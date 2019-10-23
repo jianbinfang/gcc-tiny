@@ -5,10 +5,15 @@
 // Package exec runs external commands. It wraps os.StartProcess to make it
 // easier to remap stdin and stdout, connect I/O with pipes, and do other
 // adjustments.
+//
+// Note that the examples in this package assume a Unix system.
+// They may not run on Windows, and they do not run in the Go Playground
+// used by golang.org and godoc.org.
 package exec
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -98,13 +103,15 @@ type Cmd struct {
 	// available after a call to Wait or Run.
 	ProcessState *os.ProcessState
 
-	lookPathErr     error // LookPath error, if any.
-	finished        bool  // when Wait was called
+	ctx             context.Context // nil means none
+	lookPathErr     error           // LookPath error, if any.
+	finished        bool            // when Wait was called
 	childFiles      []*os.File
 	closeAfterStart []io.Closer
 	closeAfterWait  []io.Closer
 	goroutine       []func() error
 	errch           chan error // one send per goroutine
+	waitDone        chan struct{}
 }
 
 // Command returns the Cmd struct to execute the named program with
@@ -113,12 +120,13 @@ type Cmd struct {
 // It sets only the Path and Args in the returned structure.
 //
 // If name contains no path separators, Command uses LookPath to
-// resolve the path to a complete name if possible. Otherwise it uses
-// name directly.
+// resolve name to a complete path if possible. Otherwise it uses name
+// directly as Path.
 //
 // The returned Cmd's Args field is constructed from the command name
 // followed by the elements of arg, so arg should not include the
-// command name itself. For example, Command("echo", "hello")
+// command name itself. For example, Command("echo", "hello").
+// Args[0] is always name, not the possibly resolved Path.
 func Command(name string, arg ...string) *Cmd {
 	cmd := &Cmd{
 		Path: name,
@@ -131,6 +139,20 @@ func Command(name string, arg ...string) *Cmd {
 			cmd.Path = lp
 		}
 	}
+	return cmd
+}
+
+// CommandContext is like Command but includes a context.
+//
+// The provided context is used to kill the process (by calling
+// os.Process.Kill) if the context becomes done before the command
+// completes on its own.
+func CommandContext(ctx context.Context, name string, arg ...string) *Cmd {
+	if ctx == nil {
+		panic("nil Context")
+	}
+	cmd := Command(name, arg...)
+	cmd.ctx = ctx
 	return cmd
 }
 
@@ -306,6 +328,15 @@ func (c *Cmd) Start() error {
 	if c.Process != nil {
 		return errors.New("exec: already started")
 	}
+	if c.ctx != nil {
+		select {
+		case <-c.ctx.Done():
+			c.closeDescriptors(c.closeAfterStart)
+			c.closeDescriptors(c.closeAfterWait)
+			return c.ctx.Err()
+		default:
+		}
+	}
 
 	type F func(*Cmd) (*os.File, error)
 	for _, setupFd := range []F{(*Cmd).stdin, (*Cmd).stdout, (*Cmd).stderr} {
@@ -341,12 +372,35 @@ func (c *Cmd) Start() error {
 		}(fn)
 	}
 
+	if c.ctx != nil {
+		c.waitDone = make(chan struct{})
+		go func() {
+			select {
+			case <-c.ctx.Done():
+				c.Process.Kill()
+			case <-c.waitDone:
+			}
+		}()
+	}
+
 	return nil
 }
 
 // An ExitError reports an unsuccessful exit by a command.
 type ExitError struct {
 	*os.ProcessState
+
+	// Stderr holds a subset of the standard error output from the
+	// Cmd.Output method if standard error was not otherwise being
+	// collected.
+	//
+	// If the error output is long, Stderr may contain only a prefix
+	// and suffix of the output, with the middle replaced with
+	// text about the number of omitted bytes.
+	//
+	// Stderr is provided for debugging, for inclusion in error messages.
+	// Users with other needs should redirect Cmd.Stderr as needed.
+	Stderr []byte
 }
 
 func (e *ExitError) Error() string {
@@ -377,7 +431,11 @@ func (c *Cmd) Wait() error {
 		return errors.New("exec: Wait was already called")
 	}
 	c.finished = true
+
 	state, err := c.Process.Wait()
+	if c.waitDone != nil {
+		close(c.waitDone)
+	}
 	c.ProcessState = state
 
 	var copyError error
@@ -392,21 +450,34 @@ func (c *Cmd) Wait() error {
 	if err != nil {
 		return err
 	} else if !state.Success() {
-		return &ExitError{state}
+		return &ExitError{ProcessState: state}
 	}
 
 	return copyError
 }
 
 // Output runs the command and returns its standard output.
+// Any returned error will usually be of type *ExitError.
+// If c.Stderr was nil, Output populates ExitError.Stderr.
 func (c *Cmd) Output() ([]byte, error) {
 	if c.Stdout != nil {
 		return nil, errors.New("exec: Stdout already set")
 	}
-	var b bytes.Buffer
-	c.Stdout = &b
+	var stdout bytes.Buffer
+	c.Stdout = &stdout
+
+	captureErr := c.Stderr == nil
+	if captureErr {
+		c.Stderr = &prefixSuffixSaver{N: 32 << 10}
+	}
+
 	err := c.Run()
-	return b.Bytes(), err
+	if err != nil && captureErr {
+		if ee, ok := err.(*ExitError); ok {
+			ee.Stderr = c.Stderr.(*prefixSuffixSaver).Bytes()
+		}
+	}
+	return stdout.Bytes(), err
 }
 
 // CombinedOutput runs the command and returns its combined standard
@@ -445,15 +516,16 @@ func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
 	c.Stdin = pr
 	c.closeAfterStart = append(c.closeAfterStart, pr)
 	wc := &closeOnce{File: pw}
-	c.closeAfterWait = append(c.closeAfterWait, wc)
+	c.closeAfterWait = append(c.closeAfterWait, closerFunc(wc.safeClose))
 	return wc, nil
 }
 
 type closeOnce struct {
 	*os.File
 
-	once sync.Once
-	err  error
+	writers sync.RWMutex // coordinate safeClose and Write
+	once    sync.Once
+	err     error
 }
 
 func (c *closeOnce) Close() error {
@@ -463,6 +535,55 @@ func (c *closeOnce) Close() error {
 
 func (c *closeOnce) close() {
 	c.err = c.File.Close()
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
+// safeClose closes c being careful not to race with any calls to c.Write.
+// See golang.org/issue/9307 and TestEchoFileRace in exec_test.go.
+// In theory other calls could also be excluded (by writing appropriate
+// wrappers like c.Write's implementation below), but since c is most
+// commonly used as a WriteCloser, Write is the main one to worry about.
+// See also #7970, for which this is a partial fix for this specific instance.
+// The idea is that we return a WriteCloser, and so the caller can be
+// relied upon not to call Write and Close simultaneously, but it's less
+// obvious that cmd.Wait calls Close and that the caller must not call
+// Write and cmd.Wait simultaneously. In fact that seems too onerous.
+// So we change the use of Close in cmd.Wait to use safeClose, which will
+// synchronize with any Write.
+//
+// It's important that we know this won't block forever waiting for the
+// operations being excluded. At the point where this is called,
+// the invoked command has exited and the parent copy of the read side
+// of the pipe has also been closed, so there should really be no read side
+// of the pipe left. Any active writes should return very shortly with an EPIPE,
+// making it reasonable to wait for them.
+// Technically it is possible that the child forked a sub-process or otherwise
+// handed off the read side of the pipe before exiting and the current holder
+// is not reading from the pipe, and the pipe is full, in which case the close here
+// might block waiting for the write to complete. That's probably OK.
+// It's a small enough problem to be outweighed by eliminating the race here.
+func (c *closeOnce) safeClose() error {
+	c.writers.Lock()
+	err := c.Close()
+	c.writers.Unlock()
+	return err
+}
+
+func (c *closeOnce) Write(b []byte) (int, error) {
+	c.writers.RLock()
+	n, err := c.File.Write(b)
+	c.writers.RUnlock()
+	return n, err
+}
+
+func (c *closeOnce) WriteString(s string) (int, error) {
+	c.writers.RLock()
+	n, err := c.File.WriteString(s)
+	c.writers.RUnlock()
+	return n, err
 }
 
 // StdoutPipe returns a pipe that will be connected to the command's
@@ -513,4 +634,81 @@ func (c *Cmd) StderrPipe() (io.ReadCloser, error) {
 	c.closeAfterStart = append(c.closeAfterStart, pw)
 	c.closeAfterWait = append(c.closeAfterWait, pr)
 	return pr, nil
+}
+
+// prefixSuffixSaver is an io.Writer which retains the first N bytes
+// and the last N bytes written to it. The Bytes() methods reconstructs
+// it with a pretty error message.
+type prefixSuffixSaver struct {
+	N         int // max size of prefix or suffix
+	prefix    []byte
+	suffix    []byte // ring buffer once len(suffix) == N
+	suffixOff int    // offset to write into suffix
+	skipped   int64
+
+	// TODO(bradfitz): we could keep one large []byte and use part of it for
+	// the prefix, reserve space for the '... Omitting N bytes ...' message,
+	// then the ring buffer suffix, and just rearrange the ring buffer
+	// suffix when Bytes() is called, but it doesn't seem worth it for
+	// now just for error messages. It's only ~64KB anyway.
+}
+
+func (w *prefixSuffixSaver) Write(p []byte) (n int, err error) {
+	lenp := len(p)
+	p = w.fill(&w.prefix, p)
+
+	// Only keep the last w.N bytes of suffix data.
+	if overage := len(p) - w.N; overage > 0 {
+		p = p[overage:]
+		w.skipped += int64(overage)
+	}
+	p = w.fill(&w.suffix, p)
+
+	// w.suffix is full now if p is non-empty. Overwrite it in a circle.
+	for len(p) > 0 { // 0, 1, or 2 iterations.
+		n := copy(w.suffix[w.suffixOff:], p)
+		p = p[n:]
+		w.skipped += int64(n)
+		w.suffixOff += n
+		if w.suffixOff == w.N {
+			w.suffixOff = 0
+		}
+	}
+	return lenp, nil
+}
+
+// fill appends up to len(p) bytes of p to *dst, such that *dst does not
+// grow larger than w.N. It returns the un-appended suffix of p.
+func (w *prefixSuffixSaver) fill(dst *[]byte, p []byte) (pRemain []byte) {
+	if remain := w.N - len(*dst); remain > 0 {
+		add := minInt(len(p), remain)
+		*dst = append(*dst, p[:add]...)
+		p = p[add:]
+	}
+	return p
+}
+
+func (w *prefixSuffixSaver) Bytes() []byte {
+	if w.suffix == nil {
+		return w.prefix
+	}
+	if w.skipped == 0 {
+		return append(w.prefix, w.suffix...)
+	}
+	var buf bytes.Buffer
+	buf.Grow(len(w.prefix) + len(w.suffix) + 50)
+	buf.Write(w.prefix)
+	buf.WriteString("\n... omitting ")
+	buf.WriteString(strconv.FormatInt(w.skipped, 10))
+	buf.WriteString(" bytes ...\n")
+	buf.Write(w.suffix[w.suffixOff:])
+	buf.Write(w.suffix[:w.suffixOff])
+	return buf.Bytes()
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

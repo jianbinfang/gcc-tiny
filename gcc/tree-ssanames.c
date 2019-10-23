@@ -1,5 +1,5 @@
 /* Generic routines for manipulating SSA_NAME expressions
-   Copyright (C) 2003-2015 Free Software Foundation, Inc.
+   Copyright (C) 2003-2017 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -252,21 +252,34 @@ flush_ssaname_freelist (void)
 /* Return an SSA_NAME node for variable VAR defined in statement STMT
    in function FN.  STMT may be an empty statement for artificial
    references (e.g., default definitions created when a variable is
-   used without a preceding definition).  */
+   used without a preceding definition).  If VERISON is not zero then
+   allocate the SSA name with that version.  */
 
 tree
-make_ssa_name_fn (struct function *fn, tree var, gimple *stmt)
+make_ssa_name_fn (struct function *fn, tree var, gimple *stmt,
+		  unsigned int version)
 {
   tree t;
   use_operand_p imm;
 
-  gcc_assert (TREE_CODE (var) == VAR_DECL
+  gcc_assert (VAR_P (var)
 	      || TREE_CODE (var) == PARM_DECL
 	      || TREE_CODE (var) == RESULT_DECL
 	      || (TYPE_P (var) && is_gimple_reg_type (var)));
 
+  /* Get the specified SSA name version.  */
+  if (version != 0)
+    {
+      t = make_node (SSA_NAME);
+      SSA_NAME_VERSION (t) = version;
+      if (version >= SSANAMES (fn)->length ())
+	vec_safe_grow_cleared (SSANAMES (fn), version + 1);
+      gcc_assert ((*SSANAMES (fn))[version] == NULL);
+      (*SSANAMES (fn))[version] = t;
+      ssa_name_nodes_created++;
+    }
   /* If our free list has an element, then use it.  */
-  if (!vec_safe_is_empty (FREE_SSANAMES (fn)))
+  else if (!vec_safe_is_empty (FREE_SSANAMES (fn)))
     {
       t = FREE_SSANAMES (fn)->pop ();
       ssa_name_nodes_reused++;
@@ -286,7 +299,7 @@ make_ssa_name_fn (struct function *fn, tree var, gimple *stmt)
 
   if (TYPE_P (var))
     {
-      TREE_TYPE (t) = var;
+      TREE_TYPE (t) = TYPE_MAIN_VARIANT (var);
       SET_SSA_NAME_VAR_OR_IDENTIFIER (t, NULL_TREE);
     }
   else
@@ -374,6 +387,35 @@ get_range_info (const_tree name, wide_int *min, wide_int *max)
   return SSA_NAME_RANGE_TYPE (name);
 }
 
+/* Set nonnull attribute to pointer NAME.  */
+
+void
+set_ptr_nonnull (tree name)
+{
+  gcc_assert (POINTER_TYPE_P (TREE_TYPE (name)));
+  struct ptr_info_def *pi = get_ptr_info (name);
+  pi->pt.null = 0;
+}
+
+/* Return nonnull attribute of pointer NAME.  */
+bool
+get_ptr_nonnull (const_tree name)
+{
+  gcc_assert (POINTER_TYPE_P (TREE_TYPE (name)));
+  struct ptr_info_def *pi = SSA_NAME_PTR_INFO (name);
+  if (pi == NULL)
+    return false;
+  /* TODO Now pt->null is conservatively set to true in PTA
+     analysis. vrp is the only pass (including ipa-vrp)
+     that clears pt.null via set_ptr_nonull when it knows
+     for sure. PTA will preserves the pt.null value set by VRP.
+
+     When PTA analysis is improved, pt.anything, pt.nonlocal
+     and pt.escaped may also has to be considered before
+     deciding that pointer cannot point to NULL.  */
+  return !pi->pt.null;
+}
+
 /* Change non-zero bits bitmask of NAME.  */
 
 void
@@ -409,6 +451,39 @@ get_nonzero_bits (const_tree name)
     return wi::shwi (-1, precision);
 
   return ri->get_nonzero_bits ();
+}
+
+/* Return TRUE is OP, an SSA_NAME has a range of values [0..1], false
+   otherwise.
+
+   This can be because it is a boolean type, any unsigned integral
+   type with a single bit of precision, or has known range of [0..1]
+   via VRP analysis.  */
+
+bool
+ssa_name_has_boolean_range (tree op)
+{
+  gcc_assert (TREE_CODE (op) == SSA_NAME);
+
+  /* Boolean types always have a range [0..1].  */
+  if (TREE_CODE (TREE_TYPE (op)) == BOOLEAN_TYPE)
+    return true;
+
+  /* An integral type with a single bit of precision.  */
+  if (INTEGRAL_TYPE_P (TREE_TYPE (op))
+      && TYPE_UNSIGNED (TREE_TYPE (op))
+      && TYPE_PRECISION (TREE_TYPE (op)) == 1)
+    return true;
+
+  /* An integral type with more precision, but the object
+     only takes on values [0..1] as determined by VRP
+     analysis.  */
+  if (INTEGRAL_TYPE_P (TREE_TYPE (op))
+      && (TYPE_PRECISION (TREE_TYPE (op)) > 1)
+      && wi::eq_p (get_nonzero_bits (op), 1))
+    return true;
+
+  return false;
 }
 
 /* We no longer need the SSA_NAME expression VAR, release it so that
@@ -707,10 +782,6 @@ release_defs (gimple *stmt)
   tree def;
   ssa_op_iter iter;
 
-  /* Make sure that we are in SSA.  Otherwise, operand cache may point
-     to garbage.  */
-  gcc_assert (gimple_in_ssa_p (cfun));
-
   FOR_EACH_SSA_TREE_OPERAND (def, stmt, iter, SSA_OP_ALL_DEFS)
     if (TREE_CODE (def) == SSA_NAME)
       release_ssa_name (def);
@@ -726,8 +797,8 @@ replace_ssa_name_symbol (tree ssa_name, tree sym)
   TREE_TYPE (ssa_name) = TREE_TYPE (sym);
 }
 
-/* Release the vector of free SSA_NAMEs and compact the the
-   vector of SSA_NAMEs that are live.  */
+/* Release the vector of free SSA_NAMEs and compact the vector of SSA_NAMEs
+   that are live.  */
 
 static void
 release_free_names_and_compact_live_names (function *fun)

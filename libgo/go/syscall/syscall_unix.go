@@ -7,6 +7,7 @@
 package syscall
 
 import (
+	"internal/race"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -28,6 +29,7 @@ const (
 	darwin64Bit    = runtime.GOOS == "darwin" && sizeofPtr == 8
 	dragonfly64Bit = runtime.GOOS == "dragonfly" && sizeofPtr == 8
 	netbsd32Bit    = runtime.GOOS == "netbsd" && sizeofPtr == 4
+	solaris64Bit   = runtime.GOOS == "solaris" && sizeofPtr == 8
 )
 
 // Do a system call.  We look at the size of uintptr to see how to pass
@@ -210,24 +212,30 @@ func (s Signal) String() string {
 
 func Read(fd int, p []byte) (n int, err error) {
 	n, err = read(fd, p)
-	if raceenabled {
+	if race.Enabled {
 		if n > 0 {
-			raceWriteRange(unsafe.Pointer(&p[0]), n)
+			race.WriteRange(unsafe.Pointer(&p[0]), n)
 		}
 		if err == nil {
-			raceAcquire(unsafe.Pointer(&ioSync))
+			race.Acquire(unsafe.Pointer(&ioSync))
 		}
+	}
+	if msanenabled && n > 0 {
+		msanWrite(unsafe.Pointer(&p[0]), n)
 	}
 	return
 }
 
 func Write(fd int, p []byte) (n int, err error) {
-	if raceenabled {
-		raceReleaseMerge(unsafe.Pointer(&ioSync))
+	if race.Enabled {
+		race.ReleaseMerge(unsafe.Pointer(&ioSync))
 	}
 	n, err = write(fd, p)
-	if raceenabled && n > 0 {
-		raceReadRange(unsafe.Pointer(&p[0]), n)
+	if race.Enabled && n > 0 {
+		race.ReadRange(unsafe.Pointer(&p[0]), n)
+	}
+	if msanenabled && n > 0 {
+		msanRead(unsafe.Pointer(&p[0]), n)
 	}
 	return
 }

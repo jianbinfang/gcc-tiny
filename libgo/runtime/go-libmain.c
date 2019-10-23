@@ -13,7 +13,6 @@
 #include <unistd.h>
 
 #include "runtime.h"
-#include "go-alloc.h"
 #include "array.h"
 #include "arch.h"
 #include "malloc.h"
@@ -59,6 +58,12 @@ initfn (int argc, char **argv, char** env __attribute__ ((unused)))
   struct args *a;
   pthread_t tid;
 
+  runtime_isarchive = true;
+
+  setIsCgo ();
+  runtime_cpuinit ();
+  runtime_initsig(true);
+
   a = (struct args *) malloc (sizeof *a);
   if (a == NULL)
     die ("malloc", errno);
@@ -87,8 +92,6 @@ static void *
 gostart (void *arg)
 {
   struct args *a = (struct args *) arg;
-
-  runtime_isarchive = true;
 
   if (runtime_isstarted)
     return NULL;

@@ -2,7 +2,6 @@
 /* { dg-additional-options "-fno-ipa-icf" } */
 
 #include "tree-vect.h"
-#include <stdlib.h>
 
 #define N 32
 
@@ -41,6 +40,8 @@ int main (void)
   int i;
   int a[N];
   short b[N];
+
+  check_vect ();
 
   for (i = 0; i < N; i++)
     {

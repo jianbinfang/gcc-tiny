@@ -76,16 +76,20 @@ fshort-enums
 Ada AdaWhy AdaSCIL
 Use the narrowest integer type possible for enumeration types.
 
+fsigned-char
+Ada AdaWhy AdaSCIL
+Make \"char\" signed by default.
+
 gant
-Ada AdaWhy AdaSCIL Joined Undocumented
+Ada AdaWhy AdaSCIL Driver Joined Undocumented
 Catch typos.
 
 gnatO
-Ada AdaWhy AdaSCIL Separate
+Ada AdaWhy AdaSCIL Driver Separate
 Set name of output ALI file (internal switch).
 
 gnat
-Ada AdaWhy AdaSCIL Joined
+Ada AdaWhy AdaSCIL Driver Joined
 -gnat<options>	Specify options to GNAT.
 
 fbuiltin-printf

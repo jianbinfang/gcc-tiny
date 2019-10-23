@@ -1,6 +1,6 @@
 /* Implementation of the EXECUTE_COMMAND_LINE intrinsic.
-   Copyright (C) 2009-2015 Free Software Foundation, Inc.
-   Contributed by FranÃ§ois-Xavier Coudert.
+   Copyright (C) 2009-2017 Free Software Foundation, Inc.
+   Contributed by François-Xavier Coudert.
 
 This file is part of the GNU Fortran runtime library (libgfortran).
 
@@ -25,7 +25,6 @@ see the files COPYING3 and COPYING.RUNTIME respectively.  If not, see
 
 #include "libgfortran.h"
 #include <string.h>
-#include <stdlib.h>
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -55,7 +54,7 @@ set_cmdstat (int *cmdstat, int value)
 #define MSGLEN 200
       char msg[MSGLEN] = "EXECUTE_COMMAND_LINE: ";
       strncat (msg, cmdmsg_values[value], MSGLEN - strlen(msg) - 1);
-      runtime_error (msg);
+      runtime_error ("%s", msg);
     }
 }
 
@@ -126,15 +125,9 @@ execute_command_line (const char *command, bool wait, int *exitstat,
   free (cmd);
 
   /* Now copy back to the Fortran string if needed.  */
-  if (cmdstat && *cmdstat > EXEC_NOERROR)
-    {
-      if (cmdmsg)
-	fstrcpy (cmdmsg, cmdmsg_len, cmdmsg_values[*cmdstat],
+  if (cmdstat && *cmdstat > EXEC_NOERROR && cmdmsg)
+    fstrcpy (cmdmsg, cmdmsg_len, cmdmsg_values[*cmdstat],
 		strlen (cmdmsg_values[*cmdstat]));
-      else
-	runtime_error ("Failure in EXECUTE_COMMAND_LINE: %s",
-		       cmdmsg_values[*cmdstat]);
-    }
 }
 
 

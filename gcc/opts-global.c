@@ -1,6 +1,6 @@
 /* Command line option handling.  Code involving global state that
    should not be shared with the driver.
-   Copyright (C) 2002-2015 Free Software Foundation, Inc.
+   Copyright (C) 2002-2017 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -167,7 +167,8 @@ lang_handle_option (struct gcc_options *opts,
 		    unsigned int lang_mask ATTRIBUTE_UNUSED, int kind,
 		    location_t loc,
 		    const struct cl_option_handlers *handlers,
-		    diagnostic_context *dc)
+		    diagnostic_context *dc,
+		    void (*) (void))
 {
   gcc_assert (opts == &global_options);
   gcc_assert (opts_set == &global_options_set);
@@ -267,10 +268,12 @@ decode_cmdline_options_to_array_default_mask (unsigned int argc,
 /* Set *HANDLERS to the default set of option handlers for use in the
    compilers proper (not the driver).  */
 void
-set_default_handlers (struct cl_option_handlers *handlers)
+set_default_handlers (struct cl_option_handlers *handlers,
+		      void (*target_option_override_hook) (void))
 {
   handlers->unknown_option_callback = unknown_option_callback;
   handlers->wrong_lang_callback = complain_wrong_lang;
+  handlers->target_option_override_hook = target_option_override_hook;
   handlers->num_handlers = 3;
   handlers->handlers[0].handler = lang_handle_option;
   handlers->handlers[0].mask = initial_lang_mask;
@@ -288,7 +291,8 @@ void
 decode_options (struct gcc_options *opts, struct gcc_options *opts_set,
 		struct cl_decoded_option *decoded_options,
 		unsigned int decoded_options_count,
-		location_t loc, diagnostic_context *dc)
+		location_t loc, diagnostic_context *dc,
+		void (*target_option_override_hook) (void))
 {
   struct cl_option_handlers handlers;
 
@@ -296,7 +300,7 @@ decode_options (struct gcc_options *opts, struct gcc_options *opts_set,
 
   lang_mask = initial_lang_mask;
 
-  set_default_handlers (&handlers);
+  set_default_handlers (&handlers, target_option_override_hook);
 
   default_options_optimization (opts, opts_set,
 				decoded_options, decoded_options_count,
@@ -309,6 +313,10 @@ decode_options (struct gcc_options *opts, struct gcc_options *opts_set,
 
   finish_options (opts, opts_set, loc);
 }
+
+/* Hold command-line options associated with stack limitation.  */
+const char *opt_fstack_limit_symbol_arg = NULL;
+int opt_fstack_limit_register_no = -1;
 
 /* Process common options that have been deferred until after the
    handlers have been called for all options.  */
@@ -417,12 +425,18 @@ handle_common_deferred_options (void)
 	    if (reg < 0)
 	      error ("unrecognized register name %qs", opt->arg);
 	    else
-	      stack_limit_rtx = gen_rtx_REG (Pmode, reg);
+	      {
+		/* Deactivate previous OPT_fstack_limit_symbol_ options.  */
+		opt_fstack_limit_symbol_arg = NULL;
+		opt_fstack_limit_register_no = reg;
+	      }
 	  }
 	  break;
 
 	case OPT_fstack_limit_symbol_:
-	  stack_limit_rtx = gen_rtx_SYMBOL_REF (Pmode, ggc_strdup (opt->arg));
+	  /* Deactivate previous OPT_fstack_limit_register_ options.  */
+	  opt_fstack_limit_register_no = -1;
+	  opt_fstack_limit_symbol_arg = opt->arg;
 	  break;
 
 	case OPT_fasan_shadow_offset_:

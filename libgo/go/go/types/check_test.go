@@ -55,6 +55,7 @@ var tests = [][]string{
 	{"testdata/errors.src"},
 	{"testdata/importdecl0a.src", "testdata/importdecl0b.src"},
 	{"testdata/importdecl1a.src", "testdata/importdecl1b.src"},
+	{"testdata/importC.src"}, // special handling in checkFiles
 	{"testdata/cycles.src"},
 	{"testdata/cycles1.src"},
 	{"testdata/cycles2.src"},
@@ -71,6 +72,7 @@ var tests = [][]string{
 	{"testdata/const1.src"},
 	{"testdata/constdecl.src"},
 	{"testdata/vardecl.src"},
+	//{"testdata/aliasdecl.src"},
 	{"testdata/expr0.src"},
 	{"testdata/expr1.src"},
 	{"testdata/expr2.src"},
@@ -79,6 +81,7 @@ var tests = [][]string{
 	{"testdata/shifts.src"},
 	{"testdata/builtins.src"},
 	{"testdata/conversions.src"},
+	{"testdata/conversions2.src"},
 	{"testdata/stmt0.src"},
 	{"testdata/stmt1.src"},
 	{"testdata/gotos.src"},
@@ -245,6 +248,10 @@ func checkFiles(t *testing.T, testfiles []string) {
 
 	// typecheck and collect typechecker errors
 	var conf Config
+	// special case for importC.src
+	if len(testfiles) == 1 && testfiles[0] == "testdata/importC.src" {
+		conf.FakeImportC = true
+	}
 	conf.Importer = importer.Default()
 	conf.Error = func(err error) {
 		if *listErrors {

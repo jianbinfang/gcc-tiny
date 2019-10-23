@@ -1,5 +1,5 @@
 /* Alias analysis for GNU C
-   Copyright (C) 1997-2015 Free Software Foundation, Inc.
+   Copyright (C) 1997-2017 Free Software Foundation, Inc.
    Contributed by John Carr (jfc@mit.edu).
 
 This file is part of GCC.
@@ -27,6 +27,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "tree.h"
 #include "gimple.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "gimple-ssa.h"
 #include "emit-rtl.h"
@@ -125,15 +126,6 @@ struct GTY(()) alias_set_entry {
   /* The alias set number, as stored in MEM_ALIAS_SET.  */
   alias_set_type alias_set;
 
-  /* The children of the alias set.  These are not just the immediate
-     children, but, in fact, all descendants.  So, if we have:
-
-       struct T { struct S s; float f; }
-
-     continuing our example above, the children here will be all of
-     `int', `double', `float', and `struct S'.  */
-  hash_map<alias_set_hash, int> *children;
-
   /* Nonzero if would have a child of zero: this effectively makes this
      alias set the same as alias set zero.  */
   bool has_zero_child;
@@ -144,6 +136,15 @@ struct GTY(()) alias_set_entry {
   bool is_pointer;
   /* Nonzero if is_pointer or if one of childs have has_pointer set.  */
   bool has_pointer;
+
+  /* The children of the alias set.  These are not just the immediate
+     children, but, in fact, all descendants.  So, if we have:
+
+       struct T { struct S s; float f; }
+
+     continuing our example above, the children here will be all of
+     `int', `double', `float', and `struct S'.  */
+  hash_map<alias_set_hash, int> *children;
 };
 
 static int rtx_equal_for_memref_p (const_rtx, const_rtx);
@@ -158,6 +159,7 @@ static tree decl_for_component_ref (tree);
 static int write_dependence_p (const_rtx,
 			       const_rtx, machine_mode, rtx,
 			       bool, bool, bool);
+static int compare_base_symbol_refs (const_rtx, const_rtx);
 
 static void memory_modified_1 (rtx, const_rtx, void *);
 
@@ -309,7 +311,7 @@ ao_ref_from_mem (ao_ref *ref, const_rtx mem)
   /* If this is a reference based on a partitioned decl replace the
      base with a MEM_REF of the pointer representative we
      created during stack slot partitioning.  */
-  if (TREE_CODE (base) == VAR_DECL
+  if (VAR_P (base)
       && ! is_global_var (base)
       && cfun->gimple_df->decls_to_pointers != NULL)
     {
@@ -611,12 +613,24 @@ component_uses_parent_alias_set_from (const_tree t)
 {
   const_tree found = NULL_TREE;
 
+  if (AGGREGATE_TYPE_P (TREE_TYPE (t))
+      && TYPE_TYPELESS_STORAGE (TREE_TYPE (t)))
+    return const_cast <tree> (t);
+
   while (handled_component_p (t))
     {
       switch (TREE_CODE (t))
 	{
 	case COMPONENT_REF:
 	  if (DECL_NONADDRESSABLE_P (TREE_OPERAND (t, 1)))
+	    found = t;
+	  /* Permit type-punning when accessing a union, provided the access
+	     is directly through the union.  For example, this code does not
+	     permit taking the address of a union member and then storing
+	     through it.  Even the type-punning allowed here is a GCC
+	     extension, albeit a common and useful one; the C standard says
+	     that such accesses have implementation-defined behavior.  */
+	  else if (TREE_CODE (TREE_TYPE (TREE_OPERAND (t, 0))) == UNION_TYPE)
 	    found = t;
 	  break;
 
@@ -768,6 +782,10 @@ reference_alias_ptr_type_1 (tree *t)
 tree
 reference_alias_ptr_type (tree t)
 {
+  /* If the frontend assigns this alias-set zero, preserve that.  */
+  if (lang_hooks.get_alias_set (t) == 0)
+    return ptr_type_node;
+
   tree ptype = reference_alias_ptr_type_1 (&t);
   /* If there is a given pointer type for aliasing purposes, return it.  */
   if (ptype != NULL_TREE)
@@ -826,7 +844,7 @@ get_alias_set (tree t)
 
   /* We can not give up with -fno-strict-aliasing because we need to build
      proper type representation for possible functions which are build with
-     -fstirct-aliasing.  */
+     -fstrict-aliasing.  */
 
   /* return 0 if this or its type is an error.  */
   if (t == error_mark_node
@@ -857,7 +875,7 @@ get_alias_set (tree t)
       /* If we've already determined the alias set for a decl, just return
 	 it.  This is necessary for C++ anonymous unions, whose component
 	 variables don't look like union members (boo!).  */
-      if (TREE_CODE (t) == VAR_DECL
+      if (VAR_P (t)
 	  && DECL_RTL_SET_P (t) && MEM_P (DECL_RTL (t)))
 	return MEM_ALIAS_SET (DECL_RTL (t));
 
@@ -868,6 +886,10 @@ get_alias_set (tree t)
   /* Variant qualifiers don't affect the alias set, so get the main
      variant.  */
   t = TYPE_MAIN_VARIANT (t);
+
+  if (AGGREGATE_TYPE_P (t)
+      && TYPE_TYPELESS_STORAGE (t))
+    return 0;
 
   /* Always use the canonical type as well.  If this is a type that
      requires structural comparisons to identify compatible types
@@ -1385,7 +1407,7 @@ find_base_value (rtx src)
       if (GET_CODE (src) != PLUS && GET_CODE (src) != MINUS)
 	break;
 
-      /* ... fall through ...  */
+      /* fall through */
 
     case PLUS:
     case MINUS:
@@ -1694,13 +1716,7 @@ canon_rtx (rtx x)
       rtx x1 = canon_rtx (XEXP (x, 1));
 
       if (x0 != XEXP (x, 0) || x1 != XEXP (x, 1))
-	{
-	  if (CONST_INT_P (x0))
-	    return plus_constant (GET_MODE (x), x1, INTVAL (x0));
-	  else if (CONST_INT_P (x1))
-	    return plus_constant (GET_MODE (x), x0, INTVAL (x1));
-	  return gen_rtx_PLUS (GET_MODE (x), x0, x1);
-	}
+	return simplify_gen_binary (PLUS, GET_MODE (x), x0, x1);
     }
 
   /* This gives us much better alias analysis when called from
@@ -1753,18 +1769,10 @@ rtx_equal_for_memref_p (const_rtx x, const_rtx y)
       return REGNO (x) == REGNO (y);
 
     case LABEL_REF:
-      return LABEL_REF_LABEL (x) == LABEL_REF_LABEL (y);
+      return label_ref_label (x) == label_ref_label (y);
 
     case SYMBOL_REF:
-      {
-	tree x_decl = SYMBOL_REF_DECL (x);
-	tree y_decl = SYMBOL_REF_DECL (y);
-
-	if (!x_decl || !y_decl)
-	  return XSTR (x, 0) == XSTR (y, 0);
-	else
-	  return compare_base_decls (x_decl, y_decl) == 1;
-      }
+      return compare_base_symbol_refs (x, y) == 1;
 
     case ENTRY_VALUE:
       /* This is magic, don't go through canonicalization et al.  */
@@ -2038,17 +2046,95 @@ compare_base_decls (tree base1, tree base2)
   if (base1 == base2)
     return 1;
 
+  /* If we have two register decls with register specification we
+     cannot decide unless their assembler name is the same.  */
+  if (DECL_REGISTER (base1)
+      && DECL_REGISTER (base2)
+      && DECL_ASSEMBLER_NAME_SET_P (base1)
+      && DECL_ASSEMBLER_NAME_SET_P (base2))
+    {
+      if (DECL_ASSEMBLER_NAME (base1) == DECL_ASSEMBLER_NAME (base2))
+	return 1;
+      return -1;
+    }
+
   /* Declarations of non-automatic variables may have aliases.  All other
      decls are unique.  */
   if (!decl_in_symtab_p (base1)
       || !decl_in_symtab_p (base2))
     return 0;
 
-  ret = symtab_node::get_create (base1)->equal_address_to
-		 (symtab_node::get_create (base2), true);
-  if (ret == 2)
-    return -1;
+  /* Don't cause symbols to be inserted by the act of checking.  */
+  symtab_node *node1 = symtab_node::get (base1);
+  if (!node1)
+    return 0;
+  symtab_node *node2 = symtab_node::get (base2);
+  if (!node2)
+    return 0;
+  
+  ret = node1->equal_address_to (node2, true);
   return ret;
+}
+
+/* Same as compare_base_decls but for SYMBOL_REF.  */
+
+static int
+compare_base_symbol_refs (const_rtx x_base, const_rtx y_base)
+{
+  tree x_decl = SYMBOL_REF_DECL (x_base);
+  tree y_decl = SYMBOL_REF_DECL (y_base);
+  bool binds_def = true;
+
+  if (XSTR (x_base, 0) == XSTR (y_base, 0))
+    return 1;
+  if (x_decl && y_decl)
+    return compare_base_decls (x_decl, y_decl);
+  if (x_decl || y_decl)
+    {
+      if (!x_decl)
+	{
+	  std::swap (x_decl, y_decl);
+	  std::swap (x_base, y_base);
+	}
+      /* We handle specially only section anchors and assume that other
+ 	 labels may overlap with user variables in an arbitrary way.  */
+      if (!SYMBOL_REF_HAS_BLOCK_INFO_P (y_base))
+        return -1;
+      /* Anchors contains static VAR_DECLs and CONST_DECLs.  We are safe
+	 to ignore CONST_DECLs because they are readonly.  */
+      if (!VAR_P (x_decl)
+	  || (!TREE_STATIC (x_decl) && !TREE_PUBLIC (x_decl)))
+	return 0;
+
+      symtab_node *x_node = symtab_node::get_create (x_decl)
+			    ->ultimate_alias_target ();
+      /* External variable can not be in section anchor.  */
+      if (!x_node->definition)
+	return 0;
+      x_base = XEXP (DECL_RTL (x_node->decl), 0);
+      /* If not in anchor, we can disambiguate.  */
+      if (!SYMBOL_REF_HAS_BLOCK_INFO_P (x_base))
+	return 0;
+
+      /* We have an alias of anchored variable.  If it can be interposed;
+ 	 we must assume it may or may not alias its anchor.  */
+      binds_def = decl_binds_to_current_def_p (x_decl);
+    }
+  /* If we have variable in section anchor, we can compare by offset.  */
+  if (SYMBOL_REF_HAS_BLOCK_INFO_P (x_base)
+      && SYMBOL_REF_HAS_BLOCK_INFO_P (y_base))
+    {
+      if (SYMBOL_REF_BLOCK (x_base) != SYMBOL_REF_BLOCK (y_base))
+	return 0;
+      if (SYMBOL_REF_BLOCK_OFFSET (x_base) == SYMBOL_REF_BLOCK_OFFSET (y_base))
+	return binds_def ? 1 : -1;
+      if (SYMBOL_REF_ANCHOR_P (x_base) != SYMBOL_REF_ANCHOR_P (y_base))
+	return -1;
+      return 0;
+    }
+  /* In general we assume that memory locations pointed to by different labels
+     may overlap in undefined ways.  */
+  return -1;
 }
 
 /* Return 0 if the addresses X and Y are known to point to different
@@ -2088,21 +2174,10 @@ base_alias_check (rtx x, rtx x_base, rtx y, rtx y_base,
   if (rtx_equal_p (x_base, y_base))
     return 1;
 
-  if (GET_CODE (x_base) == SYMBOL_REF && GET_CODE (y_base) == SYMBOL_REF)
-    {
-      tree x_decl = SYMBOL_REF_DECL (x_base);
-      tree y_decl = SYMBOL_REF_DECL (y_base);
-
-      /* We can assume that no stores are made to labels.  */
-      if (!x_decl || !y_decl)
-	return 0;
-      return compare_base_decls (x_decl, y_decl) != 0;
-    }
-
   /* The base addresses are different expressions.  If they are not accessed
      via AND, there is no conflict.  We can bring knowledge of object
      alignment into play here.  For example, on alpha, "char a, b;" can
-     alias one another, though "char a; long b;" cannot.  AND addesses may
+     alias one another, though "char a; long b;" cannot.  AND addresses may
      implicitly alias surrounding objects; i.e. unaligned access in DImode
      via AND address can alias all surrounding object types except those
      with aligment 8 or higher.  */
@@ -2118,6 +2193,9 @@ base_alias_check (rtx x, rtx x_base, rtx y, rtx y_base,
     return 1;
 
   /* Differing symbols not accessed via AND never alias.  */
+  if (GET_CODE (x_base) == SYMBOL_REF && GET_CODE (y_base) == SYMBOL_REF)
+    return compare_base_symbol_refs (x_base, y_base) != 0;
+
   if (GET_CODE (x_base) != ADDRESS && GET_CODE (y_base) != ADDRESS)
     return 0;
 
@@ -2142,8 +2220,8 @@ refs_newer_value_p (const_rtx expr, rtx v)
 }
 
 /* Convert the address X into something we can use.  This is done by returning
-   it unchanged unless it is a value; in the latter case we call cselib to get
-   a more useful rtx.  */
+   it unchanged unless it is a VALUE or VALUE +/- constant; for VALUE
+   we call cselib to get a more useful rtx.  */
 
 rtx
 get_addr (rtx x)
@@ -2152,7 +2230,23 @@ get_addr (rtx x)
   struct elt_loc_list *l;
 
   if (GET_CODE (x) != VALUE)
-    return x;
+    {
+      if ((GET_CODE (x) == PLUS || GET_CODE (x) == MINUS)
+	  && GET_CODE (XEXP (x, 0)) == VALUE
+	  && CONST_SCALAR_INT_P (XEXP (x, 1)))
+	{
+	  rtx op0 = get_addr (XEXP (x, 0));
+	  if (op0 != XEXP (x, 0))
+	    {
+	      if (GET_CODE (x) == PLUS
+		  && GET_CODE (XEXP (x, 1)) == CONST_INT)
+		return plus_constant (GET_MODE (x), op0, INTVAL (XEXP (x, 1)));
+	      return simplify_gen_binary (GET_CODE (x), GET_MODE (x),
+					  op0, XEXP (x, 1));
+	    }
+	}
+      return x;
+    }
   v = CSELIB_VAL_PTR (x);
   if (v)
     {
@@ -2322,23 +2416,17 @@ memrefs_conflict_p (int xsize, rtx x, int ysize, rtx y, HOST_WIDE_INT c)
 
   if (GET_CODE (x) == SYMBOL_REF && GET_CODE (y) == SYMBOL_REF)
     {
-      tree x_decl = SYMBOL_REF_DECL (x);
-      tree y_decl = SYMBOL_REF_DECL (y);
-      int cmp;
-
-      if (!x_decl || !y_decl)
-	{
-	  /* Label and normal symbol are never the same. */
-	  if (x_decl != y_decl)
-	    return 0;
-	  return offset_overlap_p (c, xsize, ysize);
-	}
-      else
-        cmp = compare_base_decls (x_decl, y_decl);
+      int cmp = compare_base_symbol_refs (x,y);
 
       /* If both decls are the same, decide by offsets.  */
       if (cmp == 1)
         return offset_overlap_p (c, xsize, ysize);
+      /* Assume a potential overlap for symbolic addresses that went
+	 through alignment adjustments (i.e., that have negative
+	 sizes), because we can't know how far they are from each
+	 other.  */
+      if (xsize < 0 || ysize < 0)
+	return -1;
       /* If decls are different or we know by offsets that there is no overlap,
 	 we win.  */
       if (!cmp || !offset_overlap_p (c, xsize, ysize))
@@ -2461,7 +2549,7 @@ memrefs_conflict_p (int xsize, rtx x, int ysize, rtx y, HOST_WIDE_INT c)
     {
       HOST_WIDE_INT sc = INTVAL (XEXP (x, 1));
       unsigned HOST_WIDE_INT uc = sc;
-      if (sc < 0 && -uc == (uc & -uc))
+      if (sc < 0 && pow2_or_zerop (-uc))
 	{
 	  if (xsize > 0)
 	    xsize = -xsize;
@@ -2476,7 +2564,7 @@ memrefs_conflict_p (int xsize, rtx x, int ysize, rtx y, HOST_WIDE_INT c)
     {
       HOST_WIDE_INT sc = INTVAL (XEXP (y, 1));
       unsigned HOST_WIDE_INT uc = sc;
-      if (sc < 0 && -uc == (uc & -uc))
+      if (sc < 0 && pow2_or_zerop (-uc))
 	{
 	  if (ysize > 0)
 	    ysize = -ysize;
@@ -2590,8 +2678,8 @@ adjust_offset_for_component_ref (tree x, bool *known_p,
 
       offset_int woffset
 	= (wi::to_offset (xoffset)
-	   + wi::lrshift (wi::to_offset (DECL_FIELD_BIT_OFFSET (field)),
-			  LOG2_BITS_PER_UNIT));
+	   + (wi::to_offset (DECL_FIELD_BIT_OFFSET (field))
+	      >> LOG2_BITS_PER_UNIT));
       if (!wi::fits_uhwi_p (woffset))
 	{
 	  *known_p = false;
@@ -2681,6 +2769,21 @@ nonoverlapping_memrefs_p (const_rtx x, const_rtx y, bool loop_invariant)
       || TREE_CODE (expry) == CONST_DECL)
     return 1;
 
+  /* If one decl is known to be a function or label in a function and
+     the other is some kind of data, they can't overlap.  */
+  if ((TREE_CODE (exprx) == FUNCTION_DECL
+       || TREE_CODE (exprx) == LABEL_DECL)
+      != (TREE_CODE (expry) == FUNCTION_DECL
+	  || TREE_CODE (expry) == LABEL_DECL))
+    return 1;
+
+  /* If either of the decls doesn't have DECL_RTL set (e.g. marked as
+     living in multiple places), we can't tell anything.  Exception
+     are FUNCTION_DECLs for which we can create DECL_RTL on demand.  */
+  if ((!DECL_RTL_SET_P (exprx) && TREE_CODE (exprx) != FUNCTION_DECL)
+      || (!DECL_RTL_SET_P (expry) && TREE_CODE (expry) != FUNCTION_DECL))
+    return 0;
+
   rtlx = DECL_RTL (exprx);
   rtly = DECL_RTL (expry);
 
@@ -2723,7 +2826,7 @@ nonoverlapping_memrefs_p (const_rtx x, const_rtx y, bool loop_invariant)
 
   /* Offset based disambiguation not appropriate for loop invariant */
   if (loop_invariant)
-    return 0;              
+    return 0;
 
   /* Offset based disambiguation is OK even if we do not know that the
      declarations are necessarily different
@@ -2995,6 +3098,20 @@ output_dependence (const_rtx mem, const_rtx x)
   return write_dependence_p (mem, x, VOIDmode, NULL_RTX,
 			     /*mem_canonicalized=*/false,
 			     /*x_canonicalized*/false, /*writep=*/true);
+}
+
+/* Likewise, but we already have a canonicalized MEM, and X_ADDR for X.
+   Also, consider X in X_MODE (which might be from an enclosing
+   STRICT_LOW_PART / ZERO_EXTRACT).
+   If MEM_CANONICALIZED is true, MEM is canonicalized.  */
+
+int
+canon_output_dependence (const_rtx mem, bool mem_canonicalized,
+			 const_rtx x, machine_mode x_mode, rtx x_addr)
+{
+  return write_dependence_p (mem, x, x_mode, x_addr,
+			     mem_canonicalized, /*x_canonicalized=*/true,
+			     /*writep=*/true);
 }
 
 

@@ -1,6 +1,5 @@
-
 /* Perform branch target register load optimizations.
-   Copyright (C) 2001-2015 Free Software Foundation, Inc.
+   Copyright (C) 2001-2017 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -28,6 +27,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "df.h"
 #include "insn-config.h"
 #include "regs.h"
+#include "memmodel.h"
 #include "emit-rtl.h"
 #include "recog.h"
 #include "diagnostic-core.h"
@@ -188,14 +188,14 @@ basic_block_freq (const_basic_block bb)
   return bb->frequency;
 }
 
-/* If X references (sets or reads) any branch target register, return one
-   such register.  If EXCLUDEP is set, disregard any references within
-   that location.  */
+/* If the rtx at *XP references (sets or reads) any branch target
+   register, return one such register.  If EXCLUDEP is set, disregard
+   any references within that location.  */
 static rtx *
-find_btr_use (rtx x, rtx *excludep = 0)
+find_btr_use (rtx *xp, rtx *excludep = 0)
 {
   subrtx_ptr_iterator::array_type array;
-  FOR_EACH_SUBRTX_PTR (iter, array, &x, NONCONST)
+  FOR_EACH_SUBRTX_PTR (iter, array, xp, NONCONST)
     {
       rtx *loc = *iter;
       if (loc == excludep)
@@ -232,7 +232,7 @@ insn_sets_btr_p (const rtx_insn *insn, int check_const, int *regno)
       if (REG_P (dest)
 	  && TEST_HARD_REG_BIT (all_btrs, REGNO (dest)))
 	{
-	  gcc_assert (!find_btr_use (src));
+	  gcc_assert (!find_btr_use (&src));
 
 	  if (!check_const || CONSTANT_P (src))
 	    {
@@ -324,7 +324,7 @@ new_btr_user (basic_block bb, int insn_luid, rtx_insn *insn)
      to decide whether we can replace all target register
      uses easily.
    */
-  rtx *usep = find_btr_use (PATTERN (insn));
+  rtx *usep = find_btr_use (&PATTERN (insn));
   rtx use;
   btr_user *user = NULL;
 
@@ -335,7 +335,7 @@ new_btr_user (basic_block bb, int insn_luid, rtx_insn *insn)
       /* We want to ensure that USE is the only use of a target
 	 register in INSN, so that we know that to rewrite INSN to use
 	 a different target register, all we have to do is replace USE.  */
-      unambiguous_single_use = !find_btr_use (PATTERN (insn), usep);
+      unambiguous_single_use = !find_btr_use (&PATTERN (insn), usep);
       if (!unambiguous_single_use)
 	usep = NULL;
     }
@@ -511,7 +511,7 @@ compute_defs_uses_and_gen (btr_heap_t *all_btr_defs, btr_def **def_array,
 		}
 	      else
 		{
-		  if (find_btr_use (PATTERN (insn)))
+		  if (find_btr_use (&PATTERN (insn)))
 		    {
 		      btr_user *user = new_btr_user (bb, insn_luid, insn);
 
@@ -627,7 +627,7 @@ compute_out (sbitmap *bb_out, sbitmap *bb_gen, sbitmap *bb_kill, int max_uid)
      Iterate until the bb_out sets stop growing.  */
   int i;
   int changed;
-  sbitmap bb_in = sbitmap_alloc (max_uid);
+  auto_sbitmap bb_in (max_uid);
 
   for (i = NUM_FIXED_BLOCKS; i < last_basic_block_for_fn (cfun); i++)
     bitmap_copy (bb_out[i], bb_gen[i]);
@@ -643,7 +643,6 @@ compute_out (sbitmap *bb_out, sbitmap *bb_gen, sbitmap *bb_kill, int max_uid)
 					       bb_in, bb_kill[i]);
 	}
     }
-  sbitmap_free (bb_in);
 }
 
 static void
@@ -651,7 +650,7 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 	       sbitmap *btr_defset, int max_uid)
 {
   int i;
-  sbitmap reaching_defs = sbitmap_alloc (max_uid);
+  auto_sbitmap reaching_defs (max_uid);
 
   /* Link uses to the uses lists of all of their reaching defs.
      Count up the number of reaching defs of each use.  */
@@ -684,7 +683,7 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 	      if (user != NULL)
 		{
 		  /* Find all the reaching defs for this use.  */
-		  sbitmap reaching_defs_of_reg = sbitmap_alloc (max_uid);
+		  auto_sbitmap reaching_defs_of_reg (max_uid);
 		  unsigned int uid = 0;
 		  sbitmap_iterator sbi;
 
@@ -739,7 +738,6 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 		      user->next = def->uses;
 		      def->uses = user;
 		    }
-		  sbitmap_free (reaching_defs_of_reg);
 		}
 
 	      if (CALL_P (insn))
@@ -755,7 +753,6 @@ link_btr_uses (btr_def **def_array, btr_user **use_array, sbitmap *bb_out,
 	    }
 	}
     }
-  sbitmap_free (reaching_defs);
 }
 
 static void

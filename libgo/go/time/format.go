@@ -23,7 +23,7 @@ import "errors"
 // compatibility with fixed-width Unix time formats.
 //
 // A decimal point followed by one or more zeros represents a fractional
-// second, printed to the given number of decimal places.  A decimal point
+// second, printed to the given number of decimal places. A decimal point
 // followed by one or more nines represents a fractional second, printed to
 // the given number of decimal places, with trailing zeros removed.
 // When parsing (only), the input may contain a fractional second
@@ -34,14 +34,33 @@ import "errors"
 // Numeric time zone offsets format as follows:
 //	-0700  ±hhmm
 //	-07:00 ±hh:mm
+//	-07    ±hh
 // Replacing the sign in the format with a Z triggers
 // the ISO 8601 behavior of printing Z instead of an
-// offset for the UTC zone.  Thus:
+// offset for the UTC zone. Thus:
 //	Z0700  Z or ±hhmm
 //	Z07:00 Z or ±hh:mm
+//	Z07    Z or ±hh
+//
+// The recognized day of week formats are "Mon" and "Monday".
+// The recognized month formats are "Jan" and "January".
+//
+// Text in the format string that is not recognized as part of the reference
+// time is echoed verbatim during Format and expected to appear verbatim
+// in the input to Parse.
 //
 // The executable example for time.Format demonstrates the working
 // of the layout string in detail and is a good reference.
+//
+// Note that the RFC822, RFC850, and RFC1123 formats should be applied
+// only to local times. Applying them to UTC times will use "UTC" as the
+// time zone abbreviation, while strictly speaking those RFCs require the
+// use of "GMT" in that case.
+// In general RFC1123Z should be used instead of RFC1123 for servers
+// that insist on that format, and RFC3339 should be preferred for new protocols.
+// RFC822, RFC822Z, RFC1123, and RFC1123Z are useful for formatting;
+// when used with time.Parse they do not accept all the time formats
+// permitted by the RFCs.
 const (
 	ANSIC       = "Mon Jan _2 15:04:05 2006"
 	UnixDate    = "Mon Jan _2 15:04:05 MST 2006"
@@ -86,6 +105,7 @@ const (
 	stdTZ                    = iota                // "MST"
 	stdISO8601TZ                                   // "Z0700"  // prints Z for UTC
 	stdISO8601SecondsTZ                            // "Z070000"
+	stdISO8601ShortTZ                              // "Z07"
 	stdISO8601ColonTZ                              // "Z07:00" // prints Z for UTC
 	stdISO8601ColonSecondsTZ                       // "Z07:00:00"
 	stdNumTZ                                       // "-0700"  // always numeric
@@ -162,8 +182,12 @@ func nextStdChunk(layout string) (prefix string, std int, suffix string) {
 			}
 			return layout[0:i], stdDay, layout[i+1:]
 
-		case '_': // _2
+		case '_': // _2, _2006
 			if len(layout) >= i+2 && layout[i+1] == '2' {
+				//_2006 is really a literal _, followed by stdLongYear
+				if len(layout) >= i+5 && layout[i+1:i+5] == "2006" {
+					return layout[0 : i+1], stdLongYear, layout[i+5:]
+				}
 				return layout[0:i], stdUnderDay, layout[i+2:]
 			}
 
@@ -215,6 +239,9 @@ func nextStdChunk(layout string) (prefix string, std int, suffix string) {
 			}
 			if len(layout) >= i+6 && layout[i:i+6] == "Z07:00" {
 				return layout[0:i], stdISO8601ColonTZ, layout[i+6:]
+			}
+			if len(layout) >= i+3 && layout[i:i+3] == "Z07" {
+				return layout[0:i], stdISO8601ShortTZ, layout[i+3:]
 			}
 
 		case '.': // .000 or .999 - repeated digits for fractional seconds.
@@ -518,7 +545,7 @@ func (t Time) AppendFormat(b []byte, layout string) []byte {
 		case stdZeroMinute:
 			b = appendInt(b, min, 2)
 		case stdSecond:
-			b = appendInt(b, sec, 2)
+			b = appendInt(b, sec, 0)
 		case stdZeroSecond:
 			b = appendInt(b, sec, 2)
 		case stdPM:
@@ -533,10 +560,10 @@ func (t Time) AppendFormat(b []byte, layout string) []byte {
 			} else {
 				b = append(b, "am"...)
 			}
-		case stdISO8601TZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ColonSecondsTZ, stdNumTZ, stdNumColonTZ, stdNumSecondsTz, stdNumColonSecondsTZ:
-			// Ugly special case.  We cheat and take the "Z" variants
+		case stdISO8601TZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ShortTZ, stdISO8601ColonSecondsTZ, stdNumTZ, stdNumColonTZ, stdNumSecondsTz, stdNumShortTZ, stdNumColonSecondsTZ:
+			// Ugly special case. We cheat and take the "Z" variants
 			// to mean "the time zone as formatted for ISO 8601".
-			if offset == 0 && (std == stdISO8601TZ || std == stdISO8601ColonTZ || std == stdISO8601SecondsTZ || std == stdISO8601ColonSecondsTZ) {
+			if offset == 0 && (std == stdISO8601TZ || std == stdISO8601ColonTZ || std == stdISO8601SecondsTZ || std == stdISO8601ShortTZ || std == stdISO8601ColonSecondsTZ) {
 				b = append(b, 'Z')
 				break
 			}
@@ -553,7 +580,9 @@ func (t Time) AppendFormat(b []byte, layout string) []byte {
 			if std == stdISO8601ColonTZ || std == stdNumColonTZ || std == stdISO8601ColonSecondsTZ || std == stdNumColonSecondsTZ {
 				b = append(b, ':')
 			}
-			b = appendInt(b, zone%60, 2)
+			if std != stdNumShortTZ && std != stdISO8601ShortTZ {
+				b = appendInt(b, zone%60, 2)
+			}
 
 			// append seconds if appropriate
 			if std == stdISO8601SecondsTZ || std == stdNumSecondsTz || std == stdNumColonSecondsTZ || std == stdISO8601ColonSecondsTZ {
@@ -696,6 +725,11 @@ func skip(value, prefix string) (string, error) {
 // location and zone in the returned time. Otherwise it records the time as
 // being in a fabricated location with time fixed at the given zone offset.
 //
+// No checking is done that the day of the month is within the month's
+// valid dates; any one- or two-digit value is accepted. For example
+// February 31 and even February 99 are valid dates, specifying dates
+// in March and May. This behavior is consistent with time.Date.
+//
 // When parsing a time with a zone abbreviation like MST, if the zone abbreviation
 // has a defined offset in the current location, then that offset is used.
 // The zone abbreviation "UTC" is recognized as UTC regardless of location.
@@ -794,7 +828,8 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 				value = value[1:]
 			}
 			day, value, err = getnum(value, std == stdZeroDay)
-			if day < 0 || 31 < day {
+			if day < 0 {
+				// Note that we allow any one- or two-digit day here.
 				rangeErrString = "day"
 			}
 		case stdHour:
@@ -816,6 +851,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			sec, value, err = getnum(value, std == stdZeroSecond)
 			if sec < 0 || 60 <= sec {
 				rangeErrString = "second"
+				break
 			}
 			// Special case: do we have a fractional second but no
 			// fractional second in the format?
@@ -861,8 +897,8 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			default:
 				err = errBad
 			}
-		case stdISO8601TZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ColonSecondsTZ, stdNumTZ, stdNumShortTZ, stdNumColonTZ, stdNumSecondsTz, stdNumColonSecondsTZ:
-			if (std == stdISO8601TZ || std == stdISO8601ColonTZ) && len(value) >= 1 && value[0] == 'Z' {
+		case stdISO8601TZ, stdISO8601ColonTZ, stdISO8601SecondsTZ, stdISO8601ShortTZ, stdISO8601ColonSecondsTZ, stdNumTZ, stdNumShortTZ, stdNumColonTZ, stdNumSecondsTz, stdNumColonSecondsTZ:
+			if (std == stdISO8601TZ || std == stdISO8601ShortTZ || std == stdISO8601ColonTZ) && len(value) >= 1 && value[0] == 'Z' {
 				value = value[1:]
 				z = UTC
 				break
@@ -878,7 +914,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 					break
 				}
 				sign, hour, min, seconds, value = value[0:1], value[1:3], value[4:6], "00", value[6:]
-			} else if std == stdNumShortTZ {
+			} else if std == stdNumShortTZ || std == stdISO8601ShortTZ {
 				if len(value) < 3 {
 					err = errBad
 					break
@@ -975,6 +1011,11 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 		hour = 0
 	}
 
+	// Validate the day of the month.
+	if day < 1 || day > daysIn(Month(month), year) {
+		return Time{}, &ParseError{alayout, avalue, "", value, ": day out of range"}
+	}
+
 	if z != nil {
 		return Date(year, Month(month), day, hour, min, sec, nsec, z), nil
 	}
@@ -987,12 +1028,12 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 		// If that zone was in effect at the given time, use it.
 		name, offset, _, _, _ := local.lookup(t.sec + internalToUnix)
 		if offset == zoneOffset && (zoneName == "" || name == zoneName) {
-			t.loc = local
+			t.setLoc(local)
 			return t, nil
 		}
 
 		// Otherwise create fake zone to record offset.
-		t.loc = FixedZone(zoneName, zoneOffset)
+		t.setLoc(FixedZone(zoneName, zoneOffset))
 		return t, nil
 	}
 
@@ -1003,7 +1044,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 		offset, _, ok := local.lookupName(zoneName, t.sec+internalToUnix)
 		if ok {
 			t.sec -= int64(offset)
-			t.loc = local
+			t.setLoc(local)
 			return t, nil
 		}
 
@@ -1012,7 +1053,7 @@ func parse(layout, value string, defaultLocation, local *Location) (Time, error)
 			offset, _ = atoi(zoneName[3:]) // Guaranteed OK by parseGMT.
 			offset *= 3600
 		}
-		t.loc = FixedZone(zoneName, offset)
+		t.setLoc(FixedZone(zoneName, offset))
 		return t, nil
 	}
 
@@ -1060,8 +1101,9 @@ func parseTimeZone(value string) (length int, ok bool) {
 		if value[4] == 'T' {
 			return 5, true
 		}
-	case 4: // Must end in T to match.
-		if value[3] == 'T' {
+	case 4:
+		// Must end in T, except one special case.
+		if value[3] == 'T' || value[:4] == "WITA" {
 			return 4, true
 		}
 	case 3:
@@ -1140,6 +1182,37 @@ func leadingInt(s string) (x int64, rem string, err error) {
 	return x, s[i:], nil
 }
 
+// leadingFraction consumes the leading [0-9]* from s.
+// It is used only for fractions, so does not return an error on overflow,
+// it just stops accumulating precision.
+func leadingFraction(s string) (x int64, scale float64, rem string) {
+	i := 0
+	scale = 1
+	overflow := false
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		if overflow {
+			continue
+		}
+		if x > (1<<63-1)/10 {
+			// It's possible for overflow to give a positive number, so take care.
+			overflow = true
+			continue
+		}
+		y := x*10 + int64(c) - '0'
+		if y < 0 {
+			overflow = true
+			continue
+		}
+		x = y
+		scale *= 10
+	}
+	return x, scale, s[i:]
+}
+
 var unitMap = map[string]int64{
 	"ns": int64(Nanosecond),
 	"us": int64(Microsecond),
@@ -1202,13 +1275,7 @@ func ParseDuration(s string) (Duration, error) {
 		if s != "" && s[0] == '.' {
 			s = s[1:]
 			pl := len(s)
-			f, s, err = leadingInt(s)
-			if err != nil {
-				return 0, errors.New("time: invalid duration " + orig)
-			}
-			for n := pl - len(s); n > 0; n-- {
-				scale *= 10
-			}
+			f, scale, s = leadingFraction(s)
 			post = pl != len(s)
 		}
 		if !pre && !post {

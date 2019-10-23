@@ -1,5 +1,6 @@
-/* { dg-do compile { target int128 } } */
+/* { dg-do compile } */
 /* { dg-require-effective-target powerpc_p8vector_ok } */
+/* { dg-require-effective-target int128 } */
 /* { dg-options "-mpower8-vector -O2" } */
 
 #include <altivec.h>
@@ -37,6 +38,7 @@ void foo (vector unsigned char *vucr,
   *vuxr++ = vec_adde (vuxa, vuxb, vuxc);
   *vsxr++ = vec_addec (vsxa, vsxb, vsxc);
   *vuxr++ = vec_addec (vuxa, vuxb, vuxc);
+  *vucr++ = vec_bperm (vuca, vucb);
   *vulr++ = vec_bperm (vuxa, vucb);
   *vbcr++ = vec_eqv (vbca, vbcb);
   *vbir++ = vec_eqv (vbia, vbib);
@@ -63,7 +65,7 @@ void foo (vector unsigned char *vucr,
 /* { dg-final { scan-assembler-times "vaddcuq" 2 } } */
 /* { dg-final { scan-assembler-times "vaddeuqm" 2 } } */
 /* { dg-final { scan-assembler-times "vaddecuq" 2 } } */
-/* { dg-final { scan-assembler-times "vbpermq" 1 } } */
+/* { dg-final { scan-assembler-times "vbpermq" 2 } } */
 /* { dg-final { scan-assembler-times "xxleqv" 4 } } */
 /* { dg-final { scan-assembler-times "vgbbd" 1 } } */
 /* { dg-final { scan-assembler-times "xxlnand" 4 } } */

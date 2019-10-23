@@ -1,5 +1,5 @@
 /* Header file for SSA dominator optimizations.
-   Copyright (C) 2013-2015 Free Software Foundation, Inc.
+   Copyright (C) 2013-2017 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -32,6 +32,9 @@ along with GCC; see the file COPYING3.  If not see
 #include "fold-const.h"
 #include "tree-eh.h"
 #include "internal-fn.h"
+#include "tree-dfa.h"
+#include "options.h"
+#include "params.h"
 
 static bool hashable_expr_equal_p (const struct hashable_expr *,
 				   const struct hashable_expr *);
@@ -91,6 +94,153 @@ avail_exprs_stack::record_expr (class expr_hash_elt *elt1,
     }
 
   m_stack.safe_push (std::pair<expr_hash_elt_t, expr_hash_elt_t> (elt1, elt2));
+}
+
+/* Helper for walk_non_aliased_vuses.  Determine if we arrived at
+   the desired memory state.  */
+
+static void *
+vuse_eq (ao_ref *, tree vuse1, unsigned int cnt, void *data)
+{
+  tree vuse2 = (tree) data;
+  if (vuse1 == vuse2)
+    return data;
+
+  /* This bounds the stmt walks we perform on reference lookups
+     to O(1) instead of O(N) where N is the number of dominating
+     stores leading to a candidate.  We re-use the SCCVN param
+     for this as it is basically the same complexity.  */
+  if (cnt > (unsigned) PARAM_VALUE (PARAM_SCCVN_MAX_ALIAS_QUERIES_PER_ACCESS))
+    return (void *)-1;
+
+  return NULL;
+}
+
+/* Search for an existing instance of STMT in the AVAIL_EXPRS_STACK table.
+   If found, return its LHS. Otherwise insert STMT in the table and
+   return NULL_TREE.
+
+   Also, when an expression is first inserted in the  table, it is also
+   is also added to AVAIL_EXPRS_STACK, so that it can be removed when
+   we finish processing this block and its children.  */
+
+tree
+avail_exprs_stack::lookup_avail_expr (gimple *stmt, bool insert, bool tbaa_p)
+{
+  expr_hash_elt **slot;
+  tree lhs;
+
+  /* Get LHS of phi, assignment, or call; else NULL_TREE.  */
+  if (gimple_code (stmt) == GIMPLE_PHI)
+    lhs = gimple_phi_result (stmt);
+  else
+    lhs = gimple_get_lhs (stmt);
+
+  class expr_hash_elt element (stmt, lhs);
+
+  if (dump_file && (dump_flags & TDF_DETAILS))
+    {
+      fprintf (dump_file, "LKUP ");
+      element.print (dump_file);
+    }
+
+  /* Don't bother remembering constant assignments and copy operations.
+     Constants and copy operations are handled by the constant/copy propagator
+     in optimize_stmt.  */
+  if (element.expr()->kind == EXPR_SINGLE
+      && (TREE_CODE (element.expr()->ops.single.rhs) == SSA_NAME
+          || is_gimple_min_invariant (element.expr()->ops.single.rhs)))
+    return NULL_TREE;
+
+  /* Finally try to find the expression in the main expression hash table.  */
+  slot = m_avail_exprs->find_slot (&element, (insert ? INSERT : NO_INSERT));
+  if (slot == NULL)
+    {
+      return NULL_TREE;
+    }
+  else if (*slot == NULL)
+    {
+      class expr_hash_elt *element2 = new expr_hash_elt (element);
+      *slot = element2;
+
+      record_expr (element2, NULL, '2');
+      return NULL_TREE;
+    }
+
+  /* If we found a redundant memory operation do an alias walk to
+     check if we can re-use it.  */
+  if (gimple_vuse (stmt) != (*slot)->vop ())
+    {
+      tree vuse1 = (*slot)->vop ();
+      tree vuse2 = gimple_vuse (stmt);
+      /* If we have a load of a register and a candidate in the
+	 hash with vuse1 then try to reach its stmt by walking
+	 up the virtual use-def chain using walk_non_aliased_vuses.
+	 But don't do this when removing expressions from the hash.  */
+      ao_ref ref;
+      if (!(vuse1 && vuse2
+	    && gimple_assign_single_p (stmt)
+	    && TREE_CODE (gimple_assign_lhs (stmt)) == SSA_NAME
+	    && (ao_ref_init (&ref, gimple_assign_rhs1 (stmt)),
+		ref.base_alias_set = ref.ref_alias_set = tbaa_p ? -1 : 0, true)
+	    && walk_non_aliased_vuses (&ref, vuse2,
+				       vuse_eq, NULL, NULL, vuse1) != NULL))
+	{
+	  if (insert)
+	    {
+	      class expr_hash_elt *element2 = new expr_hash_elt (element);
+
+	      /* Insert the expr into the hash by replacing the current
+		 entry and recording the value to restore in the
+		 avail_exprs_stack.  */
+	      record_expr (element2, *slot, '2');
+	      *slot = element2;
+	    }
+	  return NULL_TREE;
+	}
+    }
+
+  /* Extract the LHS of the assignment so that it can be used as the current
+     definition of another variable.  */
+  lhs = (*slot)->lhs ();
+
+  /* Valueize the result.  */
+  if (TREE_CODE (lhs) == SSA_NAME)
+    {
+      tree tem = SSA_NAME_VALUE (lhs);
+      if (tem)
+	lhs = tem;
+    }
+
+  if (dump_file && (dump_flags & TDF_DETAILS))
+    {
+      fprintf (dump_file, "FIND: ");
+      print_generic_expr (dump_file, lhs, 0);
+      fprintf (dump_file, "\n");
+    }
+
+  return lhs;
+}
+
+/* Enter condition equivalence P into the hash table.
+
+   This indicates that a conditional expression has a known
+   boolean value.  */
+
+void
+avail_exprs_stack::record_cond (cond_equivalence *p)
+{
+  class expr_hash_elt *element = new expr_hash_elt (&p->cond, p->value);
+  expr_hash_elt **slot;
+
+  slot = m_avail_exprs->find_slot_with_hash (element, element->hash (), INSERT);
+  if (*slot == NULL)
+    {
+      *slot = element;
+      record_expr (element, NULL, '1');
+    }
+  else
+    delete element;
 }
 
 /* Generate a hash value for a pair of expressions.  This can be used
@@ -209,9 +359,76 @@ avail_expr_hash (class expr_hash_elt *p)
   const struct hashable_expr *expr = p->expr ();
   inchash::hash hstate;
 
+  if (expr->kind == EXPR_SINGLE)
+    {
+      /* T could potentially be a switch index or a goto dest.  */
+      tree t = expr->ops.single.rhs;
+      if (TREE_CODE (t) == MEM_REF || handled_component_p (t))
+	{
+	  /* Make equivalent statements of both these kinds hash together.
+	     Dealing with both MEM_REF and ARRAY_REF allows us not to care
+	     about equivalence with other statements not considered here.  */
+	  bool reverse;
+	  HOST_WIDE_INT offset, size, max_size;
+	  tree base = get_ref_base_and_extent (t, &offset, &size, &max_size,
+					       &reverse);
+	  /* Strictly, we could try to normalize variable-sized accesses too,
+	    but here we just deal with the common case.  */
+	  if (size != -1
+	      && size == max_size)
+	    {
+	      enum tree_code code = MEM_REF;
+	      hstate.add_object (code);
+	      inchash::add_expr (base, hstate);
+	      hstate.add_object (offset);
+	      hstate.add_object (size);
+	      return hstate.end ();
+	    }
+	}
+    }
+
   inchash::add_hashable_expr (expr, hstate);
 
   return hstate.end ();
+}
+
+/* Compares trees T0 and T1 to see if they are MEM_REF or ARRAY_REFs equivalent
+   to each other.  (That is, they return the value of the same bit of memory.)
+
+   Return TRUE if the two are so equivalent; FALSE if not (which could still
+   mean the two are equivalent by other means).  */
+
+static bool
+equal_mem_array_ref_p (tree t0, tree t1)
+{
+  if (TREE_CODE (t0) != MEM_REF && ! handled_component_p (t0))
+    return false;
+  if (TREE_CODE (t1) != MEM_REF && ! handled_component_p (t1))
+    return false;
+
+  if (!types_compatible_p (TREE_TYPE (t0), TREE_TYPE (t1)))
+    return false;
+  bool rev0;
+  HOST_WIDE_INT off0, sz0, max0;
+  tree base0 = get_ref_base_and_extent (t0, &off0, &sz0, &max0, &rev0);
+  if (sz0 == -1
+      || sz0 != max0)
+    return false;
+
+  bool rev1;
+  HOST_WIDE_INT off1, sz1, max1;
+  tree base1 = get_ref_base_and_extent (t1, &off1, &sz1, &max1, &rev1);
+  if (sz1 == -1
+      || sz1 != max1)
+    return false;
+
+  if (rev0 != rev1)
+    return false;
+
+  /* Types were compatible, so this is a sanity check.  */
+  gcc_assert (sz0 == sz1);
+
+  return (off0 == off1) && operand_equal_p (base0, base1, 0);
 }
 
 /* Compare two hashable_expr structures for equivalence.  They are
@@ -246,9 +463,10 @@ hashable_expr_equal_p (const struct hashable_expr *expr0,
   switch (expr0->kind)
     {
     case EXPR_SINGLE:
-      return operand_equal_p (expr0->ops.single.rhs,
-                              expr1->ops.single.rhs, 0);
-
+      return equal_mem_array_ref_p (expr0->ops.single.rhs,
+				    expr1->ops.single.rhs)
+	     || operand_equal_p (expr0->ops.single.rhs,
+				 expr1->ops.single.rhs, 0);
     case EXPR_UNARY:
       if (expr0->ops.unary.op != expr1->ops.unary.op)
         return false;
@@ -631,26 +849,13 @@ const_and_copies::pop_to_marker (void)
     }
 }
 
-/* Record that X has the value Y.  */
+/* Record that X has the value Y and that X's previous value is PREV_X. 
+
+   This variant does not follow the value chain for Y.  */
 
 void
-const_and_copies::record_const_or_copy (tree x, tree y)
+const_and_copies::record_const_or_copy_raw (tree x, tree y, tree prev_x)
 {
-  record_const_or_copy (x, y, SSA_NAME_VALUE (x));
-}
-
-/* Record that X has the value Y and that X's previous value is PREV_X.  */
-
-void
-const_and_copies::record_const_or_copy (tree x, tree y, tree prev_x)
-{
-  /* Y may be NULL if we are invalidating entries in the table.  */
-  if (y && TREE_CODE (y) == SSA_NAME)
-    {
-      tree tmp = SSA_NAME_VALUE (y);
-      y = tmp ? tmp : y;
-    }
-
   if (dump_file && (dump_flags & TDF_DETAILS))
     {
       fprintf (dump_file, "0>>> COPY ");
@@ -664,6 +869,31 @@ const_and_copies::record_const_or_copy (tree x, tree y, tree prev_x)
   m_stack.reserve (2);
   m_stack.quick_push (prev_x);
   m_stack.quick_push (x);
+}
+
+/* Record that X has the value Y.  */
+
+void
+const_and_copies::record_const_or_copy (tree x, tree y)
+{
+  record_const_or_copy (x, y, SSA_NAME_VALUE (x));
+}
+
+/* Record that X has the value Y and that X's previous value is PREV_X. 
+
+   This variant follow's Y value chain.  */
+
+void
+const_and_copies::record_const_or_copy (tree x, tree y, tree prev_x)
+{
+  /* Y may be NULL if we are invalidating entries in the table.  */
+  if (y && TREE_CODE (y) == SSA_NAME)
+    {
+      tree tmp = SSA_NAME_VALUE (y);
+      y = tmp ? tmp : y;
+    }
+
+  record_const_or_copy_raw (x, y, prev_x);
 }
 
 bool
@@ -717,3 +947,125 @@ initialize_expr_from_cond (tree cond, struct hashable_expr *expr)
     gcc_unreachable ();
 }
 
+/* Build a cond_equivalence record indicating that the comparison
+   CODE holds between operands OP0 and OP1 and push it to **P.  */
+
+static void
+build_and_record_new_cond (enum tree_code code,
+                           tree op0, tree op1,
+                           vec<cond_equivalence> *p,
+			   bool val = true)
+{
+  cond_equivalence c;
+  struct hashable_expr *cond = &c.cond;
+
+  gcc_assert (TREE_CODE_CLASS (code) == tcc_comparison);
+
+  cond->type = boolean_type_node;
+  cond->kind = EXPR_BINARY;
+  cond->ops.binary.op = code;
+  cond->ops.binary.opnd0 = op0;
+  cond->ops.binary.opnd1 = op1;
+
+  c.value = val ? boolean_true_node : boolean_false_node;
+  p->safe_push (c);
+}
+
+/* Record that COND is true and INVERTED is false into the edge information
+   structure.  Also record that any conditions dominated by COND are true
+   as well.
+
+   For example, if a < b is true, then a <= b must also be true.  */
+
+void
+record_conditions (vec<cond_equivalence> *p, tree cond, tree inverted)
+{
+  tree op0, op1;
+  cond_equivalence c;
+
+  if (!COMPARISON_CLASS_P (cond))
+    return;
+
+  op0 = TREE_OPERAND (cond, 0);
+  op1 = TREE_OPERAND (cond, 1);
+
+  switch (TREE_CODE (cond))
+    {
+    case LT_EXPR:
+    case GT_EXPR:
+      if (FLOAT_TYPE_P (TREE_TYPE (op0)))
+	{
+	  build_and_record_new_cond (ORDERED_EXPR, op0, op1, p);
+	  build_and_record_new_cond (LTGT_EXPR, op0, op1, p);
+	}
+
+      build_and_record_new_cond ((TREE_CODE (cond) == LT_EXPR
+				  ? LE_EXPR : GE_EXPR),
+				 op0, op1, p);
+      build_and_record_new_cond (NE_EXPR, op0, op1, p);
+      build_and_record_new_cond (EQ_EXPR, op0, op1, p, false);
+      break;
+
+    case GE_EXPR:
+    case LE_EXPR:
+      if (FLOAT_TYPE_P (TREE_TYPE (op0)))
+	{
+	  build_and_record_new_cond (ORDERED_EXPR, op0, op1, p);
+	}
+      break;
+
+    case EQ_EXPR:
+      if (FLOAT_TYPE_P (TREE_TYPE (op0)))
+	{
+	  build_and_record_new_cond (ORDERED_EXPR, op0, op1, p);
+	}
+      build_and_record_new_cond (LE_EXPR, op0, op1, p);
+      build_and_record_new_cond (GE_EXPR, op0, op1, p);
+      break;
+
+    case UNORDERED_EXPR:
+      build_and_record_new_cond (NE_EXPR, op0, op1, p);
+      build_and_record_new_cond (UNLE_EXPR, op0, op1, p);
+      build_and_record_new_cond (UNGE_EXPR, op0, op1, p);
+      build_and_record_new_cond (UNEQ_EXPR, op0, op1, p);
+      build_and_record_new_cond (UNLT_EXPR, op0, op1, p);
+      build_and_record_new_cond (UNGT_EXPR, op0, op1, p);
+      break;
+
+    case UNLT_EXPR:
+    case UNGT_EXPR:
+      build_and_record_new_cond ((TREE_CODE (cond) == UNLT_EXPR
+				  ? UNLE_EXPR : UNGE_EXPR),
+				 op0, op1, p);
+      build_and_record_new_cond (NE_EXPR, op0, op1, p);
+      break;
+
+    case UNEQ_EXPR:
+      build_and_record_new_cond (UNLE_EXPR, op0, op1, p);
+      build_and_record_new_cond (UNGE_EXPR, op0, op1, p);
+      break;
+
+    case LTGT_EXPR:
+      build_and_record_new_cond (NE_EXPR, op0, op1, p);
+      build_and_record_new_cond (ORDERED_EXPR, op0, op1, p);
+      break;
+
+    default:
+      break;
+    }
+
+  /* Now store the original true and false conditions into the first
+     two slots.  */
+  initialize_expr_from_cond (cond, &c.cond);
+  c.value = boolean_true_node;
+  p->safe_push (c);
+
+  /* It is possible for INVERTED to be the negation of a comparison,
+     and not a valid RHS or GIMPLE_COND condition.  This happens because
+     invert_truthvalue may return such an expression when asked to invert
+     a floating-point comparison.  These comparisons are not assumed to
+     obey the trichotomy law.  */
+  initialize_expr_from_cond (inverted, &c.cond);
+  c.value = boolean_false_node;
+  p->safe_push (c);
+}

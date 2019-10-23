@@ -1,5 +1,5 @@
 /* Maintain binary trees of symbols.
-   Copyright (C) 2000-2015 Free Software Foundation, Inc.
+   Copyright (C) 2000-2017 Free Software Foundation, Inc.
    Contributed by Andy Vaught
 
 This file is part of GCC.
@@ -40,6 +40,7 @@ const mstring flavors[] =
   minit ("VARIABLE", FL_VARIABLE), minit ("PARAMETER", FL_PARAMETER),
   minit ("LABEL", FL_LABEL), minit ("PROCEDURE", FL_PROCEDURE),
   minit ("DERIVED", FL_DERIVED), minit ("NAMELIST", FL_NAMELIST),
+  minit ("UNION", FL_UNION), minit ("STRUCTURE", FL_STRUCT),
   minit (NULL, -1)
 };
 
@@ -84,6 +85,15 @@ const mstring save_status[] =
     minit ("UNKNOWN", SAVE_NONE),
     minit ("EXPLICIT-SAVE", SAVE_EXPLICIT),
     minit ("IMPLICIT-SAVE", SAVE_IMPLICIT),
+};
+
+/* Set the mstrings for DTIO procedure names.  */
+const mstring dtio_procs[] =
+{
+    minit ("_dtio_formatted_read", DTIO_RF),
+    minit ("_dtio_formatted_write", DTIO_WF),
+    minit ("_dtio_unformatted_read", DTIO_RUF),
+    minit ("_dtio_unformatted_write", DTIO_WUF),
 };
 
 /* This is to make sure the backend generates setup code in the correct
@@ -372,9 +382,10 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
     *is_bind_c = "BIND(C)", *procedure = "PROCEDURE",
     *proc_pointer = "PROCEDURE POINTER", *abstract = "ABSTRACT",
     *asynchronous = "ASYNCHRONOUS", *codimension = "CODIMENSION",
-    *contiguous = "CONTIGUOUS", *generic = "GENERIC";
+    *contiguous = "CONTIGUOUS", *generic = "GENERIC", *automatic = "AUTOMATIC";
   static const char *threadprivate = "THREADPRIVATE";
   static const char *omp_declare_target = "OMP DECLARE TARGET";
+  static const char *omp_declare_target_link = "OMP DECLARE TARGET LINK";
   static const char *oacc_declare_copyin = "OACC DECLARE COPYIN";
   static const char *oacc_declare_create = "OACC DECLARE CREATE";
   static const char *oacc_declare_deviceptr = "OACC DECLARE DEVICEPTR";
@@ -437,6 +448,7 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
       conf (dummy, save);
       conf (in_common, save);
       conf (result, save);
+      conf (automatic, save);
 
       switch (attr->flavor)
 	{
@@ -444,7 +456,7 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
 	  case FL_BLOCK_DATA:
 	  case FL_MODULE:
 	  case FL_LABEL:
-	  case FL_DERIVED:
+	  case_fl_struct:
 	  case FL_PARAMETER:
             a1 = gfc_code2string (flavors, attr->flavor);
             a2 = save;
@@ -453,7 +465,6 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
 	    gfc_error ("Namelist group name at %L cannot have the "
 		       "SAVE attribute", where);
 	    return false; 
-	    break;
 	  case FL_PROCEDURE:
 	    /* Conflicts between SAVE and PROCEDURE will be checked at
 	       resolution stage, see "resolve_fl_procedure".  */
@@ -463,8 +474,13 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
 	}
     }
 
-  if (attr->dummy && ((attr->function || attr->subroutine) && 
-			gfc_current_state () == COMP_CONTAINS))
+  /* The copying of procedure dummy arguments for module procedures in
+     a submodule occur whilst the current state is COMP_CONTAINS. It
+     is necessary, therefore, to let this through.  */
+  if (attr->dummy
+      && (attr->function || attr->subroutine)
+      && gfc_current_state () == COMP_CONTAINS
+      && !(gfc_new_block && gfc_new_block->abr_modproc_decl))
     gfc_error_now ("internal procedure %qs at %L conflicts with "
 		   "DUMMY argument", name, where);
 
@@ -472,11 +488,18 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
   conf (dummy, intrinsic);
   conf (dummy, threadprivate);
   conf (dummy, omp_declare_target);
+  conf (dummy, omp_declare_target_link);
   conf (pointer, target);
   conf (pointer, intrinsic);
   conf (pointer, elemental);
   conf (pointer, codimension);
   conf (allocatable, elemental);
+
+  conf (in_common, automatic);
+  conf (in_equivalence, automatic);
+  conf (result, automatic);
+  conf (use_assoc, automatic);
+  conf (dummy, automatic);
 
   conf (target, external);
   conf (target, intrinsic);
@@ -516,14 +539,18 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
   conf (in_equivalence, allocatable);
   conf (in_equivalence, threadprivate);
   conf (in_equivalence, omp_declare_target);
+  conf (in_equivalence, omp_declare_target_link);
   conf (in_equivalence, oacc_declare_create);
   conf (in_equivalence, oacc_declare_copyin);
   conf (in_equivalence, oacc_declare_deviceptr);
   conf (in_equivalence, oacc_declare_device_resident);
+  conf (in_equivalence, is_bind_c);
 
   conf (dummy, result);
   conf (entry, result);
   conf (generic, result);
+  conf (generic, omp_declare_target);
+  conf (generic, omp_declare_target_link);
 
   conf (function, subroutine);
 
@@ -569,6 +596,7 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
   conf (cray_pointee, in_equivalence);
   conf (cray_pointee, threadprivate);
   conf (cray_pointee, omp_declare_target);
+  conf (cray_pointee, omp_declare_target_link);
   conf (cray_pointee, oacc_declare_create);
   conf (cray_pointee, oacc_declare_copyin);
   conf (cray_pointee, oacc_declare_deviceptr);
@@ -625,8 +653,11 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
   conf (procedure, entry)
 
   conf (proc_pointer, abstract)
+  conf (proc_pointer, omp_declare_target)
+  conf (proc_pointer, omp_declare_target_link)
 
   conf (entry, omp_declare_target)
+  conf (entry, omp_declare_target_link)
   conf (entry, oacc_declare_create)
   conf (entry, oacc_declare_copyin)
   conf (entry, oacc_declare_deviceptr)
@@ -668,6 +699,7 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
       conf2 (subroutine);
       conf2 (threadprivate);
       conf2 (omp_declare_target);
+      conf2 (omp_declare_target_link);
       conf2 (oacc_declare_create);
       conf2 (oacc_declare_copyin);
       conf2 (oacc_declare_deviceptr);
@@ -718,6 +750,8 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
       if (!attr->proc_pointer)
 	conf2 (in_common);
 
+      conf2 (omp_declare_target_link);
+
       switch (attr->proc)
 	{
 	case PROC_ST_FUNCTION:
@@ -740,7 +774,7 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
 
       break;
 
-    case FL_DERIVED:
+    case_fl_struct:
       conf2 (dummy);
       conf2 (pointer);
       conf2 (target);
@@ -754,6 +788,7 @@ check_conflict (symbol_attribute *attr, const char *name, locus *where)
       conf2 (threadprivate);
       conf2 (result);
       conf2 (omp_declare_target);
+      conf2 (omp_declare_target_link);
       conf2 (oacc_declare_create);
       conf2 (oacc_declare_copyin);
       conf2 (oacc_declare_deviceptr);
@@ -928,6 +963,21 @@ gfc_add_allocatable (symbol_attribute *attr, locus *where)
 
   attr->allocatable = 1;
   return check_conflict (attr, NULL, where);
+}
+
+
+bool
+gfc_add_automatic (symbol_attribute *attr, const char *name, locus *where)
+{
+  if (check_used (attr, name, where))
+    return false;
+
+  if (attr->automatic && !gfc_notify_std (GFC_STD_LEGACY,
+	"Duplicate AUTOMATIC attribute specified at %L", where))
+    return false;
+
+  attr->automatic = 1;
+  return check_conflict (attr, name, where);
 }
 
 
@@ -1269,6 +1319,22 @@ gfc_add_omp_declare_target (symbol_attribute *attr, const char *name,
 
 
 bool
+gfc_add_omp_declare_target_link (symbol_attribute *attr, const char *name,
+				 locus *where)
+{
+
+  if (check_used (attr, name, where))
+    return false;
+
+  if (attr->omp_declare_target_link)
+    return true;
+
+  attr->omp_declare_target_link = 1;
+  return check_conflict (attr, name, where);
+}
+
+
+bool
 gfc_add_oacc_declare_create (symbol_attribute *attr, const char *name,
 			     locus *where)
 {
@@ -1579,11 +1645,18 @@ gfc_add_flavor (symbol_attribute *attr, sym_flavor f, const char *name,
 {
 
   if ((f == FL_PROGRAM || f == FL_BLOCK_DATA || f == FL_MODULE
-       || f == FL_PARAMETER || f == FL_LABEL || f == FL_DERIVED
+       || f == FL_PARAMETER || f == FL_LABEL || gfc_fl_struct(f)
        || f == FL_NAMELIST) && check_used (attr, name, where))
     return false;
 
   if (attr->flavor == f && f == FL_VARIABLE)
+    return true;
+
+  /* Copying a procedure dummy argument for a module procedure in a
+     submodule results in the flavor being copied and would result in
+     an error without this.  */
+  if (gfc_new_block && gfc_new_block->abr_modproc_decl
+      && attr->flavor == f && f == FL_PROCEDURE)
     return true;
 
   if (attr->flavor != FL_UNKNOWN)
@@ -1879,6 +1952,8 @@ gfc_copy_attr (symbol_attribute *dest, symbol_attribute *src, locus *where)
   if (src->allocatable && !gfc_add_allocatable (dest, where))
     goto fail;
 
+  if (src->automatic && !gfc_add_automatic (dest, NULL, where))
+    goto fail;
   if (src->dimension && !gfc_add_dimension (dest, NULL, where))
     goto fail;
   if (src->codimension && !gfc_add_codimension (dest, NULL, where))
@@ -1904,6 +1979,9 @@ gfc_copy_attr (symbol_attribute *dest, symbol_attribute *src, locus *where)
     goto fail;
   if (src->omp_declare_target
       && !gfc_add_omp_declare_target (dest, NULL, where))
+    goto fail;
+  if (src->omp_declare_target_link
+      && !gfc_add_omp_declare_target_link (dest, NULL, where))
     goto fail;
   if (src->oacc_declare_create
       && !gfc_add_oacc_declare_create (dest, NULL, where))
@@ -2048,6 +2126,11 @@ gfc_add_component (gfc_symbol *sym, const char *name,
 {
   gfc_component *p, *tail;
 
+  /* Check for existing components with the same name, but not for union
+     components or containers. Unions and maps are anonymous so they have
+     unique internal names which will never conflict.
+     Don't use gfc_find_component here because it calls gfc_use_derived,
+     but the derived type may not be fully defined yet. */
   tail = NULL;
 
   for (p = sym->components; p; p = p->next)
@@ -2063,7 +2146,8 @@ gfc_add_component (gfc_symbol *sym, const char *name,
     }
 
   if (sym->attr.extension
-	&& gfc_find_component (sym->components->ts.u.derived, name, true, true))
+	&& gfc_find_component (sym->components->ts.u.derived,
+                               name, true, true, NULL))
     {
       gfc_error ("Component %qs at %C already in the parent type "
 		 "at %L", name, &sym->components->ts.u.derived->declared_at);
@@ -2078,7 +2162,7 @@ gfc_add_component (gfc_symbol *sym, const char *name,
   else
     tail->next = p;
 
-  p->name = gfc_get_string (name);
+  p->name = gfc_get_string ("%s", name);
   p->loc = gfc_current_locus;
   p->ts.type = BT_UNKNOWN;
 
@@ -2154,7 +2238,7 @@ gfc_use_derived (gfc_symbol *sym)
       return NULL;
     }
 
-  if (s == NULL || s->attr.flavor != FL_DERIVED)
+  if (s == NULL || !gfc_fl_struct (s->attr.flavor))
     goto bad;
 
   /* Get rid of symbol sym, translating all references to s.  */
@@ -2188,28 +2272,113 @@ bad:
 }
 
 
+/* Find the component with the given name in the union type symbol.
+   If ref is not NULL it will be set to the chain of components through which
+   the component can actually be accessed. This is necessary for unions because
+   intermediate structures may be maps, nested structures, or other unions,
+   all of which may (or must) be 'anonymous' to user code.  */
+
+static gfc_component *
+find_union_component (gfc_symbol *un, const char *name,
+                      bool noaccess, gfc_ref **ref)
+{
+  gfc_component *m, *check;
+  gfc_ref *sref, *tmp;
+
+  for (m = un->components; m; m = m->next)
+    {
+      check = gfc_find_component (m->ts.u.derived, name, noaccess, true, &tmp);
+      if (check == NULL)
+        continue;
+
+      /* Found component somewhere in m; chain the refs together.  */
+      if (ref)
+        {
+          /* Map ref. */
+          sref = gfc_get_ref ();
+          sref->type = REF_COMPONENT;
+          sref->u.c.component = m;
+          sref->u.c.sym = m->ts.u.derived;
+          sref->next = tmp;
+
+          *ref = sref;
+        }
+      /* Other checks (such as access) were done in the recursive calls.  */
+      return check;
+    }
+  return NULL;
+}
+
+
 /* Given a derived type node and a component name, try to locate the
    component structure.  Returns the NULL pointer if the component is
    not found or the components are private.  If noaccess is set, no access
-   checks are done.  */
+   checks are done.  If silent is set, an error will not be generated if
+   the component cannot be found or accessed.
+   
+   If ref is not NULL, *ref is set to represent the chain of components
+   required to get to the ultimate component.
+
+   If the component is simply a direct subcomponent, or is inherited from a
+   parent derived type in the given derived type, this is a single ref with its
+   component set to the returned component.
+
+   Otherwise, *ref is constructed as a chain of subcomponents. This occurs
+   when the component is found through an implicit chain of nested union and
+   map components. Unions and maps are "anonymous" substructures in FORTRAN
+   which cannot be explicitly referenced, but the reference chain must be
+   considered as in C for backend translation to correctly compute layouts.
+   (For example, x.a may refer to x->(UNION)->(MAP)->(UNION)->(MAP)->a).  */
 
 gfc_component *
 gfc_find_component (gfc_symbol *sym, const char *name,
-		    bool noaccess, bool silent)
+		    bool noaccess, bool silent, gfc_ref **ref)
 {
-  gfc_component *p;
+  gfc_component *p, *check;
+  gfc_ref *sref = NULL, *tmp = NULL;
 
   if (name == NULL || sym == NULL)
     return NULL;
 
-  sym = gfc_use_derived (sym);
+  if (sym->attr.flavor == FL_DERIVED)
+    sym = gfc_use_derived (sym);
+  else
+    gcc_assert (gfc_fl_struct (sym->attr.flavor));
 
   if (sym == NULL)
     return NULL;
 
+  /* Handle UNIONs specially - mutually recursive with gfc_find_component. */
+  if (sym->attr.flavor == FL_UNION)
+    return find_union_component (sym, name, noaccess, ref);
+
+  if (ref) *ref = NULL;
   for (p = sym->components; p; p = p->next)
-    if (strcmp (p->name, name) == 0)
-      break;
+    {
+      /* Nest search into union's maps. */
+      if (p->ts.type == BT_UNION)
+        {
+          check = find_union_component (p->ts.u.derived, name, noaccess, &tmp);
+          if (check != NULL)
+            {
+              /* Union ref. */
+              if (ref)
+                {
+                  sref = gfc_get_ref ();
+                  sref->type = REF_COMPONENT;
+                  sref->u.c.component = p;
+                  sref->u.c.sym = p->ts.u.derived;
+                  sref->next = tmp;
+                  *ref = sref;
+                }
+              return check;
+            }
+        }
+      else if (strcmp (p->name, name) == 0)
+        break;
+
+      continue;
+    }
 
   if (p && sym->attr.use_assoc && !noaccess)
     {
@@ -2231,7 +2400,7 @@ gfc_find_component (gfc_symbol *sym, const char *name,
 	&& sym->components->ts.type == BT_DERIVED)
     {
       p = gfc_find_component (sym->components->ts.u.derived, name,
-			      noaccess, silent);
+			      noaccess, silent, ref);
       /* Do not overwrite the error.  */
       if (p == NULL)
 	return p;
@@ -2240,6 +2409,25 @@ gfc_find_component (gfc_symbol *sym, const char *name,
   if (p == NULL && !silent)
     gfc_error ("%qs at %C is not a member of the %qs structure",
 	       name, sym->name);
+
+  /* Component was found; build the ultimate component reference. */
+  if (p != NULL && ref)
+    {
+      tmp = gfc_get_ref ();
+      tmp->type = REF_COMPONENT;
+      tmp->u.c.component = p;
+      tmp->u.c.sym = sym;
+      /* Link the final component ref to the end of the chain of subrefs. */
+      if (sref)
+        {
+          *ref = sref;
+          for (; sref->next; sref = sref->next)
+            ;
+          sref->next = tmp;
+        }
+      else
+        *ref = tmp;
+    }
 
   return p;
 }
@@ -2581,7 +2769,7 @@ gfc_new_symtree (gfc_symtree **root, const char *name)
   gfc_symtree *st;
 
   st = XCNEW (gfc_symtree);
-  st->name = gfc_get_string (name);
+  st->name = gfc_get_string ("%s", name);
 
   gfc_insert_bbt (root, st, compare_symtree);
   return st;
@@ -2594,10 +2782,20 @@ void
 gfc_delete_symtree (gfc_symtree **root, const char *name)
 {
   gfc_symtree st, *st0;
+  const char *p;
 
-  st0 = gfc_find_symtree (*root, name);
+  /* Submodules are marked as mod.submod.  When freeing a submodule
+     symbol, the symtree only has "submod", so adjust that here.  */
 
-  st.name = gfc_get_string (name);
+  p = strrchr(name, '.');
+  if (p)
+    p++;
+  else
+    p = name;
+
+  st0 = gfc_find_symtree (*root, p);
+
+  st.name = gfc_get_string ("%s", p);
   gfc_delete_bbt (root, &st, compare_symtree);
 
   free (st0);
@@ -2659,7 +2857,7 @@ gfc_get_uop (const char *name)
   st = gfc_new_symtree (&ns->uop_root, name);
 
   uop = st->n.uop = XCNEW (gfc_user_op);
-  uop->name = gfc_get_string (name);
+  uop->name = gfc_get_string ("%s", name);
   uop->access = ACCESS_UNKNOWN;
   uop->ns = ns;
 
@@ -2780,7 +2978,7 @@ gfc_new_symbol (const char *name, gfc_namespace *ns)
   if (strlen (name) > GFC_MAX_SYMBOL_LEN)
     gfc_internal_error ("new_symbol(): Symbol name too long");
 
-  p->name = gfc_get_string (name);
+  p->name = gfc_get_string ("%s", name);
 
   /* Make sure flags for symbol being C bound are clear initially.  */
   p->attr.is_bind_c = 0;
@@ -2790,6 +2988,7 @@ gfc_new_symbol (const char *name, gfc_namespace *ns)
   p->common_block = NULL;
   p->f2k_derived = NULL;
   p->assoc = NULL;
+  p->fn_result_spec = 0;
   
   return p;
 }
@@ -2819,7 +3018,11 @@ select_type_insert_tmp (gfc_symtree **st)
   gfc_select_type_stack *stack = select_type_stack;
   for (; stack; stack = stack->prev)
     if ((*st)->n.sym == stack->selector && stack->tmp)
-      *st = stack->tmp;
+      {
+        *st = stack->tmp;
+        select_type_insert_tmp (st);
+        return;
+      }
 }
 
 
@@ -3338,11 +3541,9 @@ gfc_restore_last_undo_checkpoint (void)
 	  /* The derived type is saved in the symtree with the first
 	     letter capitalized; the all lower-case version to the
 	     derived type contains its associated generic function.  */
-	  if (p->attr.flavor == FL_DERIVED)
-	    gfc_delete_symtree (&p->ns->sym_root, gfc_get_string ("%c%s",
-                        (char) TOUPPER ((unsigned char) p->name[0]),
-                        &p->name[1]));
-	  else
+	  if (gfc_fl_struct (p->attr.flavor))
+	    gfc_delete_symtree (&p->ns->sym_root,gfc_dt_upper_string (p->name));
+          else
 	    gfc_delete_symtree (&p->ns->sym_root, p->name);
 
 	  gfc_release_symbol (p);
@@ -3617,31 +3818,22 @@ gfc_charlen*
 gfc_new_charlen (gfc_namespace *ns, gfc_charlen *old_cl)
 {
   gfc_charlen *cl;
+
   cl = gfc_get_charlen ();
 
   /* Copy old_cl.  */
   if (old_cl)
     {
-      /* Put into namespace, but don't allow reject_statement
-	 to free it if old_cl is given.  */
-      gfc_charlen **prev = &ns->cl_list;
-      cl->next = ns->old_cl_list;
-      while (*prev != ns->old_cl_list)
-	prev = &(*prev)->next;
-      *prev = cl;
-      ns->old_cl_list = cl;
       cl->length = gfc_copy_expr (old_cl->length);
       cl->length_from_typespec = old_cl->length_from_typespec;
       cl->backend_decl = old_cl->backend_decl;
       cl->passed_length = old_cl->passed_length;
       cl->resolved = old_cl->resolved;
     }
-  else
-    {
-      /* Put into namespace.  */
-      cl->next = ns->cl_list;
-      ns->cl_list = cl;
-    }
+
+  /* Put into namespace.  */
+  cl->next = ns->cl_list;
+  ns->cl_list = cl;
 
   return cl;
 }
@@ -3878,6 +4070,10 @@ gfc_is_var_automatic (gfc_symbol *sym)
       && sym->ts.u.cl
       && !gfc_is_constant_expr (sym->ts.u.cl->length))
     return true;
+  /* Variables with explicit AUTOMATIC attribute.  */
+  if (sym->attr.automatic)
+      return true;
+
   return false;
 }
 
@@ -3973,7 +4169,7 @@ gfc_get_gsymbol (const char *name)
 
   s = XCNEW (gfc_gsymbol);
   s->type = GSYM_UNKNOWN;
-  s->name = gfc_get_string (name);
+  s->name = gfc_get_string ("%s", name);
 
   gfc_insert_bbt (&gfc_gsym_root, s, gsym_compare);
 
@@ -4436,7 +4632,7 @@ generate_isocbinding_symbol (const char *mod_name, iso_c_binding_symbol s,
     }
 
   /* Say what module this symbol belongs to.  */
-  tmp_sym->module = gfc_get_string (mod_name);
+  tmp_sym->module = gfc_get_string ("%s", mod_name);
   tmp_sym->from_intmod = INTMOD_ISO_C_BINDING;
   tmp_sym->intmod_sym_id = s;
   tmp_sym->attr.is_iso_c = 1;
@@ -4526,17 +4722,14 @@ generate_isocbinding_symbol (const char *mod_name, iso_c_binding_symbol s,
 	      const char *hidden_name;
 	      gfc_interface *intr, *head;
 
-	      hidden_name = gfc_get_string ("%c%s",
-					    (char) TOUPPER ((unsigned char)
-							      tmp_sym->name[0]),
-					    &tmp_sym->name[1]);
+	      hidden_name = gfc_dt_upper_string (tmp_sym->name);
 	      tmp_symtree = gfc_find_symtree (gfc_current_ns->sym_root,
 					      hidden_name);
 	      gcc_assert (tmp_symtree == NULL);
 	      gfc_get_sym_tree (hidden_name, gfc_current_ns, &tmp_symtree, false);
 	      dt_sym = tmp_symtree->n.sym;
 	      dt_sym->name = gfc_get_string (s == ISOCBINDING_PTR
-					    ? "c_ptr" : "c_funptr");
+					     ? "c_ptr" : "c_funptr");
 
 	      /* Generate an artificial generic function.  */
 	      head = tmp_sym->generic;
@@ -4556,7 +4749,7 @@ generate_isocbinding_symbol (const char *mod_name, iso_c_binding_symbol s,
 	    }
 
 	  /* Say what module this symbol belongs to.  */
-	  dt_sym->module = gfc_get_string (mod_name);
+	  dt_sym->module = gfc_get_string ("%s", mod_name);
 	  dt_sym->from_intmod = INTMOD_ISO_C_BINDING;
 	  dt_sym->intmod_sym_id = s;
           dt_sym->attr.use_assoc = 1;
@@ -4740,6 +4933,8 @@ gfc_type_compatible (gfc_typespec *ts1, gfc_typespec *ts2)
   bool is_class2 = (ts2->type == BT_CLASS);
   bool is_derived1 = (ts1->type == BT_DERIVED);
   bool is_derived2 = (ts2->type == BT_DERIVED);
+  bool is_union1 = (ts1->type == BT_UNION);
+  bool is_union2 = (ts2->type == BT_UNION);
 
   if (is_class1
       && ts1->u.derived->components
@@ -4749,10 +4944,11 @@ gfc_type_compatible (gfc_typespec *ts1, gfc_typespec *ts2)
 	  || ts1->u.derived->attr.unlimited_polymorphic))
     return 1;
 
-  if (!is_derived1 && !is_derived2 && !is_class1 && !is_class2)
+  if (!is_derived1 && !is_derived2 && !is_class1 && !is_class2
+      && !is_union1 && !is_union2)
     return (ts1->type == ts2->type);
 
-  if (is_derived1 && is_derived2)
+  if ((is_derived1 && is_derived2) || (is_union1 && is_union2))
     return gfc_compare_derived_types (ts1->u.derived, ts2->u.derived);
 
   if (is_derived1 && is_class2)
@@ -4821,12 +5017,12 @@ gfc_find_dt_in_generic (gfc_symbol *sym)
 {
   gfc_interface *intr = NULL;
 
-  if (!sym || sym->attr.flavor == FL_DERIVED)
+  if (!sym || gfc_fl_struct (sym->attr.flavor))
     return sym;
 
   if (sym->attr.generic)
     for (intr = sym->generic; intr; intr = intr->next)
-      if (intr->sym->attr.flavor == FL_DERIVED)
+      if (gfc_fl_struct (intr->sym->attr.flavor))
         break;
   return intr ? intr->sym : NULL;
 }

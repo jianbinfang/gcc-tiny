@@ -1,5 +1,5 @@
 /* Detection of Static Control Parts (SCoP) for Graphite.
-   Copyright (C) 2009-2015 Free Software Foundation, Inc.
+   Copyright (C) 2009-2017 Free Software Foundation, Inc.
    Contributed by Sebastian Pop <sebastian.pop@amd.com> and
    Tobias Grosser <grosser@fim.uni-passau.de>.
 
@@ -273,8 +273,10 @@ trivially_empty_bb_p (basic_block bb)
 static inline bool
 same_close_phi_node (gphi *p1, gphi *p2)
 {
-  return operand_equal_p (gimple_phi_arg_def (p1, 0),
-			  gimple_phi_arg_def (p2, 0), 0);
+  return (types_compatible_p (TREE_TYPE (gimple_phi_result (p1)),
+			      TREE_TYPE (gimple_phi_result (p2)))
+	  && operand_equal_p (gimple_phi_arg_def (p1, 0),
+			      gimple_phi_arg_def (p2, 0), 0));
 }
 
 static void make_close_phi_nodes_unique (basic_block bb);
@@ -336,6 +338,15 @@ make_close_phi_nodes_unique (basic_block bb)
     }
 }
 
+/* Return true when NAME is defined in LOOP.  */
+
+static bool
+defined_in_loop_p (tree name, loop_p loop)
+{
+  gcc_assert (TREE_CODE (name) == SSA_NAME);
+  return loop == loop_containing_stmt (SSA_NAME_DEF_STMT (name));
+}
+
 /* Transforms LOOP to the canonical loop closed SSA form.  */
 
 static void
@@ -376,7 +387,9 @@ canonicalize_loop_closed_ssa (loop_p loop)
 		use_operand_p use_p;
 		gphi *close_phi;
 
-		if (TREE_CODE (arg) != SSA_NAME)
+		/* Only add close phi nodes for SSA_NAMEs defined in LOOP.  */
+		if (TREE_CODE (arg) != SSA_NAME
+		    || !defined_in_loop_p (arg, loop))
 		  continue;
 
 		close_phi = create_phi_node (NULL_TREE, close);
@@ -522,21 +535,6 @@ public:
 
   static edge get_nearest_pdom_with_single_exit (basic_block dom);
 
-
-  /* Pretty printers.  */
-
-  static void print_edge (FILE *file, const_edge e)
-  {
-    fprintf (file, "edge (bb_%d, bb_%d)", e->src->index, e->dest->index);
-  }
-
-  static void print_sese (FILE *file, sese_l s)
-  {
-    fprintf (file, "(entry_"); print_edge (file, s.entry);
-    fprintf (file, ", exit_"); print_edge (file, s.exit);
-    fprintf (file, ")\n");
-  }
-
   /* Merge scops at same loop depth and returns the new sese.
      Returns a new SESE when merge was successful, INVALID_SESE otherwise.  */
 
@@ -554,7 +552,7 @@ public:
      region of code that can be represented in the polyhedral model.  SCOP
      defines the region we analyse.  */
 
-  bool loop_is_valid_scop (loop_p loop, sese_l scop) const;
+  bool loop_is_valid_in_scop (loop_p loop, sese_l scop) const;
 
   /* Return true when BEGIN is the preheader edge of a loop with a single exit
      END.  */
@@ -597,7 +595,7 @@ public:
      Limit the number of bbs between adjacent loops to
      PARAM_SCOP_MAX_NUM_BBS_BETWEEN_LOOPS.  */
 
-  bool harmful_stmt_in_region (sese_l scop) const;
+  bool harmful_loop_in_region (sese_l scop) const;
 
   /* Return true only when STMT is simple enough for being handled by Graphite.
      This depends on SCOP, as the parameters are initialized relatively to
@@ -777,8 +775,9 @@ scop_detection::merge_sese (sese_l first, sese_l second) const
   if (!second)
     return first;
 
-  DEBUG_PRINT (dp << "[try-merging-sese] s1: "; print_sese (dump_file, first);
-	       dp << "[try-merging-sese] s2: ";
+  DEBUG_PRINT (dp << "[scop-detection] try merging sese s1: ";
+	       print_sese (dump_file, first);
+	       dp << "[scop-detection] try merging sese s2: ";
 	       print_sese (dump_file, second));
 
   /* Assumption: Both the sese's should be at the same loop depth or one scop
@@ -807,7 +806,7 @@ scop_detection::merge_sese (sese_l first, sese_l second) const
 
   sese_l combined (entry, exit);
 
-  DEBUG_PRINT (dp << "checking combined sese: ";
+  DEBUG_PRINT (dp << "[scop-detection] checking combined sese: ";
 	       print_sese (dump_file, combined));
 
   /* FIXME: We could iterate to find the dom which dominates pdom, and pdom
@@ -817,6 +816,25 @@ scop_detection::merge_sese (sese_l first, sese_l second) const
       || loop_depth (entry->src->loop_father)
 	 != loop_depth (exit->dest->loop_father))
     return invalid_sese;
+
+  /* For now we just bail out when there is a loop exit in the region
+     that is not also the exit of the region.  We could enlarge the
+     region to cover the loop that region exits to.  See PR79977.  */
+  if (loop_outer (entry->src->loop_father))
+    {
+      vec<edge> exits = get_loop_exit_edges (entry->src->loop_father);
+      for (unsigned i = 0; i < exits.length (); ++i)
+	{
+	  if (exits[i] != exit
+	      && bb_in_region (exits[i]->src, entry->dest, exit->src))
+	    {
+	      DEBUG_PRINT (dp << "[scop-detection-fail] cannot merge seses.\n");
+	      exits.release ();
+	      return invalid_sese;
+	    }
+	}
+      exits.release ();
+    }
 
   /* For now we just want to bail out when exit does not post-dominate entry.
      TODO: We might just add a basic_block at the exit to make exit
@@ -837,7 +855,9 @@ scop_detection::merge_sese (sese_l first, sese_l second) const
     {
       /* Find the first empty succ (with single exit) of combined.exit.  */
       basic_block imm_succ = combined.exit->dest;
-      if (single_succ_p (imm_succ) && trivially_empty_bb_p (imm_succ))
+      if (single_succ_p (imm_succ)
+	  && single_pred_p (imm_succ)
+	  && trivially_empty_bb_p (imm_succ))
 	combined.exit = single_succ_edge (imm_succ);
       else
 	{
@@ -849,7 +869,7 @@ scop_detection::merge_sese (sese_l first, sese_l second) const
     }
 
   /* Analyze all the BBs in new sese.  */
-  if (harmful_stmt_in_region (combined))
+  if (harmful_loop_in_region (combined))
     return invalid_sese;
 
   DEBUG_PRINT (dp << "[merged-sese] s1: "; print_sese (dump_file, combined));
@@ -877,7 +897,7 @@ scop_detection::build_scop_depth (sese_l s, loop_p loop)
       return s;
     }
 
-  if (!loop_is_valid_scop (loop, s2))
+  if (!loop_is_valid_in_scop (loop, s2))
     return build_scop_depth (invalid_sese, loop->next);
 
   return build_scop_breadth (s2, loop);
@@ -903,6 +923,18 @@ scop_detection::build_scop_breadth (sese_l s1, loop_p loop)
     }
 
   sese_l combined = merge_sese (s1, s2);
+
+  /* Combining adjacent loops may add unrelated loops into the
+     region so we have to check all sub-loops of the outer loop
+     that are in the combined region.  */
+  if (combined)
+    for (l = loop_outer (loop)->inner; l; l = l->next)
+      if (bb_in_sese_p (l->header, combined)
+	  && ! loop_is_valid_in_scop (l, combined))
+	{
+	  combined = invalid_sese;
+	  break;
+	}
 
   if (combined)
     s1 = combined;
@@ -930,6 +962,8 @@ scop_detection::can_represent_loop_1 (loop_p loop, sese_l scop)
     && niter_desc.control.no_overflow
     && (niter = number_of_latch_executions (loop))
     && !chrec_contains_undetermined (niter)
+    && !chrec_contains_undetermined (scalar_evolution_in_region (scop,
+								 loop, niter))
     && graphite_can_represent_expr (scop, loop, niter);
 }
 
@@ -954,7 +988,7 @@ scop_detection::can_represent_loop (loop_p loop, sese_l scop)
    defines the region we analyse.  */
 
 bool
-scop_detection::loop_is_valid_scop (loop_p loop, sese_l scop) const
+scop_detection::loop_is_valid_in_scop (loop_p loop, sese_l scop) const
 {
   if (!scop)
     return false;
@@ -1008,7 +1042,7 @@ scop_detection::add_scop (sese_l s)
   /* Do not add scops with only one loop.  */
   if (region_has_one_loop (s))
     {
-      DEBUG_PRINT (dp << "[scop-detection-fail] Discarding one loop SCoP.\n";
+      DEBUG_PRINT (dp << "[scop-detection-fail] Discarding one loop SCoP: ";
 		   print_sese (dump_file, s));
       return;
     }
@@ -1016,7 +1050,7 @@ scop_detection::add_scop (sese_l s)
   if (get_exit_bb (s) == EXIT_BLOCK_PTR_FOR_FN (cfun))
     {
       DEBUG_PRINT (dp << "[scop-detection-fail] "
-		      << "Discarding SCoP exiting to return.";
+		      << "Discarding SCoP exiting to return: ";
 		   print_sese (dump_file, s));
       return;
     }
@@ -1029,7 +1063,7 @@ scop_detection::add_scop (sese_l s)
   remove_intersecting_scops (s);
 
   scops.safe_push (s);
-  DEBUG_PRINT (dp << "Adding SCoP "; print_sese (dump_file, s));
+  DEBUG_PRINT (dp << "[scop-detection] Adding SCoP: "; print_sese (dump_file, s));
 }
 
 /* Return true when a statement in SCOP cannot be represented by Graphite.
@@ -1038,7 +1072,7 @@ scop_detection::add_scop (sese_l s)
    PARAM_SCOP_MAX_NUM_BBS_BETWEEN_LOOPS.  */
 
 bool
-scop_detection::harmful_stmt_in_region (sese_l scop) const
+scop_detection::harmful_loop_in_region (sese_l scop) const
 {
   basic_block exit_bb = get_exit_bb (scop);
   basic_block entry_bb = get_entry_bb (scop);
@@ -1047,42 +1081,64 @@ scop_detection::harmful_stmt_in_region (sese_l scop) const
 	       print_sese (dump_file, scop));
   gcc_assert (dominated_by_p (CDI_DOMINATORS, exit_bb, entry_bb));
 
-  int depth = bb_dom_dfs_in (CDI_DOMINATORS, exit_bb)
-    - bb_dom_dfs_in (CDI_DOMINATORS, entry_bb);
+  auto_vec<basic_block> worklist;
+  auto_bitmap loops;
 
-  gcc_assert (depth > 0);
-
-  vec<basic_block> dom
-      = get_dominated_to_depth (CDI_DOMINATORS, entry_bb, depth);
-  int i;
-  basic_block bb;
-  FOR_EACH_VEC_ELT (dom, i, bb)
+  worklist.safe_push (entry_bb);
+  while (! worklist.is_empty ())
     {
+      basic_block bb = worklist.pop ();
       DEBUG_PRINT (dp << "Visiting bb_" << bb->index << "\n");
-
-      /* We don't want to analyze any bb outside sese.  */
-      if (!dominated_by_p (CDI_POST_DOMINATORS, bb, exit_bb))
-	continue;
-
-      /* Basic blocks dominated by the scop->exit are not in the scop.  */
-      if (bb != exit_bb && dominated_by_p (CDI_DOMINATORS, bb, exit_bb))
-	continue;
 
       /* The basic block should not be part of an irreducible loop.  */
       if (bb->flags & BB_IRREDUCIBLE_LOOP)
+	return true;
+
+      /* Check for unstructured control flow: CFG not generated by structured
+	 if-then-else.  */
+      if (bb->succs->length () > 1)
 	{
-	  dom.release ();
-	  return true;
+	  edge e;
+	  edge_iterator ei;
+	  FOR_EACH_EDGE (e, ei, bb->succs)
+	    if (!dominated_by_p (CDI_POST_DOMINATORS, bb, e->dest)
+		&& !dominated_by_p (CDI_DOMINATORS, e->dest, bb))
+	      return true;
 	}
 
-      if (harmful_stmt_in_bb (scop, bb))
+      /* Collect all loops in the current region.  */
+      loop_p loop = bb->loop_father;
+      if (loop_in_sese_p (loop, scop))
+	bitmap_set_bit (loops, loop->num);
+      else
 	{
-	  dom.release ();
-	  return true;
+	  /* We only check for harmful statements in basic blocks not part of
+	     any loop fully contained in the scop: other bbs are checked below
+	     in loop_is_valid_in_scop.  */
+	  if (harmful_stmt_in_bb (scop, bb))
+	    return true;
 	}
+
+      if (bb != exit_bb)
+	for (basic_block dom = first_dom_son (CDI_DOMINATORS, bb);
+	     dom;
+	     dom = next_dom_son (CDI_DOMINATORS, dom))
+	  worklist.safe_push (dom);
     }
 
-  dom.release ();
+  /* Go through all loops and check that they are still valid in the combined
+     scop.  */
+  unsigned j;
+  bitmap_iterator bi;
+  EXECUTE_IF_SET_IN_BITMAP (loops, 0, j, bi)
+    {
+      loop_p loop = (*current_loops->larray)[j];
+      gcc_assert (loop->num == (int) j);
+
+      if (!loop_is_valid_in_scop (loop, scop))
+	return true;
+    }
+
   return false;
 }
 
@@ -1475,7 +1531,10 @@ scop_detection::loop_body_is_valid_scop (loop_p loop, sese_l scop) const
       basic_block bb = bbs[i];
 
       if (harmful_stmt_in_bb (scop, bb))
-	return false;
+	{
+	  free (bbs);
+	  return false;
+	}
     }
   free (bbs);
 
@@ -1674,8 +1733,7 @@ static void
 build_cross_bb_scalars_def (scop_p scop, tree def, basic_block def_bb,
 			     vec<tree> *writes)
 {
-  gcc_assert (def);
-  if (!is_gimple_reg (def))
+  if (!def || !is_gimple_reg (def))
     return;
 
   /* Do not gather scalar variables that can be analyzed by SCEV as they can be
@@ -1846,14 +1904,39 @@ gather_bbs::gather_bbs (cdi_direction direction, scop_p scop)
 {
 }
 
+/* Record in execution order the loops fully contained in the region.  */
+
+static void
+record_loop_in_sese (basic_block bb, sese_info_p region)
+{
+  loop_p father = bb->loop_father;
+  if (loop_in_sese_p (father, region->region))
+    {
+      bool found = false;
+      loop_p loop0;
+      int j;
+      FOR_EACH_VEC_ELT (region->loop_nest, j, loop0)
+	if (father == loop0)
+	  {
+	    found = true;
+	    break;
+	  }
+      if (!found)
+	region->loop_nest.safe_push (father);
+    }
+}
+
 /* Call-back for dom_walk executed before visiting the dominated
    blocks.  */
 
 edge
 gather_bbs::before_dom_children (basic_block bb)
 {
-  if (!bb_in_sese_p (bb, scop->scop_info->region))
+  sese_info_p region = scop->scop_info;
+  if (!bb_in_sese_p (bb, region->region))
     return NULL;
+
+  record_loop_in_sese (bb, region);
 
   gcond *stmt = single_pred_cond_non_loop_exit (bb);
 
@@ -1962,8 +2045,6 @@ build_scops (vec<scop_p> *scops)
 	  free_scop (scop);
 	  continue;
 	}
-
-      build_sese_loop_nests (scop->scop_info);
 
       find_scop_parameters (scop);
       graphite_dim_t max_dim = PARAM_VALUE (PARAM_GRAPHITE_MAX_NB_SCOP_PARAMS);

@@ -1,5 +1,5 @@
 /* LTO symbol table.
-   Copyright (C) 2009-2015 Free Software Foundation, Inc.
+   Copyright (C) 2009-2017 Free Software Foundation, Inc.
    Contributed by CodeSourcery, Inc.
 
 This file is part of GCC.
@@ -81,7 +81,10 @@ lto_cgraph_replace_node (struct cgraph_node *node,
 	 ???  We really need a way to match function signatures for ABI
 	 compatibility and perform related promotions at inlining time.  */
       if (!compatible_p)
-	e->call_stmt_cannot_inline_p = 1;
+	{
+	  e->inline_failed = CIF_LTO_MISMATCHED_DECLARATIONS;
+	  e->call_stmt_cannot_inline_p = 1;
+	}
     }
   /* Redirect incomming references.  */
   prevailing_node->clone_referring (node);
@@ -302,6 +305,9 @@ lto_symtab_merge (symtab_node *prevailing, symtab_node *entry)
 
   if (prevailing_decl == decl)
     return true;
+
+  if (TREE_CODE (decl) != TREE_CODE (prevailing_decl))
+    return false;
 
   /* Merge decl state in both directions, we may still end up using
      the new decl.  */
@@ -649,6 +655,14 @@ lto_symtab_merge_decls_2 (symtab_node *first, bool diagnosed_p)
   /* Diagnose all mismatched re-declarations.  */
   FOR_EACH_VEC_ELT (mismatches, i, decl)
     {
+      /* Do not diagnose two built-in declarations, there is no useful
+         location in that case.  It also happens for AVR if two built-ins
+         use the same asm name because their libgcc assembler code is the
+         same, see PR78562.  */
+      if (DECL_IS_BUILTIN (prevailing->decl)
+	  && DECL_IS_BUILTIN (decl))
+	continue;
+
       int level = warn_type_compatibility_p (TREE_TYPE (prevailing->decl),
 					     TREE_TYPE (decl),
 					     DECL_COMDAT (decl));
@@ -954,7 +968,7 @@ lto_symtab_merge_symbols (void)
 
 	      /* The user defined assembler variables are also not unified by their
 		 symbol name (since it is irrelevant), but we need to unify symbol
-		 nodes if tree merging occured.  */
+		 nodes if tree merging occurred.  */
 	      if ((vnode = dyn_cast <varpool_node *> (node))
 		  && DECL_HARD_REGISTER (vnode->decl)
 		  && (node2 = symtab_node::get (vnode->decl))
@@ -987,6 +1001,8 @@ lto_symtab_merge_symbols (void)
 tree
 lto_symtab_prevailing_virtual_decl (tree decl)
 {
+  if (DECL_ABSTRACT_P (decl))
+    return decl;
   gcc_checking_assert (!type_in_anonymous_namespace_p (DECL_CONTEXT (decl))
 		       && DECL_ASSEMBLER_NAME_SET_P (decl));
 
@@ -997,6 +1013,18 @@ lto_symtab_prevailing_virtual_decl (tree decl)
     n = n->next_sharing_asm_name;
   if (n)
     {
+      /* Merge decl state in both directions, we may still end up using
+	 the other decl.  */
+      TREE_ADDRESSABLE (n->decl) |= TREE_ADDRESSABLE (decl);
+      TREE_ADDRESSABLE (decl) |= TREE_ADDRESSABLE (n->decl);
+
+      if (TREE_CODE (decl) == FUNCTION_DECL)
+	{
+	  /* Merge decl state in both directions, we may still end up using
+	     the other decl.  */
+	  DECL_POSSIBLY_INLINED (n->decl) |= DECL_POSSIBLY_INLINED (decl);
+	  DECL_POSSIBLY_INLINED (decl) |= DECL_POSSIBLY_INLINED (n->decl);
+	}
       lto_symtab_prevail_decl (n->decl, decl);
       decl = n->decl;
     }

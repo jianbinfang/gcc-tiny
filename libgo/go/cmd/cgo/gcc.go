@@ -1,4 +1,4 @@
-// Copyright 2009 The Go Authors.  All rights reserved.
+// Copyright 2009 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -38,8 +38,8 @@ var nameToC = map[string]string{
 	"ulong":         "unsigned long",
 	"longlong":      "long long",
 	"ulonglong":     "unsigned long long",
-	"complexfloat":  "float complex",
-	"complexdouble": "double complex",
+	"complexfloat":  "float _Complex",
+	"complexdouble": "double _Complex",
 }
 
 // cname returns the C name to use for C.s.
@@ -83,7 +83,7 @@ func (f *File) DiscardCgoDirectives() {
 	f.Preamble = strings.Join(linesOut, "\n")
 }
 
-// addToFlag appends args to flag.  All flags are later written out onto the
+// addToFlag appends args to flag. All flags are later written out onto the
 // _cgo_flags file for the build system to use.
 func (p *Package) addToFlag(flag string, args []string) {
 	p.CgoFlags[flag] = append(p.CgoFlags[flag], args...)
@@ -99,7 +99,7 @@ func (p *Package) addToFlag(flag string, args []string) {
 // Single quotes and double quotes are recognized to prevent splitting within the
 // quoted region, and are removed from the resulting substrings. If a quote in s
 // isn't closed err will be set and r will have the unclosed argument as the
-// last element.  The backslash is used for escaping.
+// last element. The backslash is used for escaping.
 //
 // For example, the following string:
 //
@@ -166,6 +166,23 @@ func (p *Package) Translate(f *File) {
 	needType := p.guessKinds(f)
 	if len(needType) > 0 {
 		p.loadDWARF(f, needType)
+	}
+	if p.rewriteCalls(f) {
+		// Add `import _cgo_unsafe "unsafe"` as the first decl
+		// after the package statement.
+		imp := &ast.GenDecl{
+			Tok: token.IMPORT,
+			Specs: []ast.Spec{
+				&ast.ImportSpec{
+					Name: ast.NewIdent("_cgo_unsafe"),
+					Path: &ast.BasicLit{
+						Kind:  token.STRING,
+						Value: `"unsafe"`,
+					},
+				},
+			},
+		}
+		f.AST.Decls = append([]ast.Decl{imp}, f.AST.Decls...)
 	}
 	p.rewriteRef(f)
 }
@@ -235,7 +252,7 @@ func (p *Package) guessKinds(f *File) []*Name {
 			if isConst {
 				n.Kind = "const"
 				// Turn decimal into hex, just for consistency
-				// with enum-derived constants.  Otherwise
+				// with enum-derived constants. Otherwise
 				// in the cgo -godefs output half the constants
 				// are in hex and half are in whatever the #define used.
 				i, err := strconv.ParseInt(n.Define, 0, 64)
@@ -384,7 +401,7 @@ func (p *Package) guessKinds(f *File) []*Name {
 	if nerrors > 0 {
 		// Check if compiling the preamble by itself causes any errors,
 		// because the messages we've printed out so far aren't helpful
-		// to users debugging preamble mistakes.  See issue 8442.
+		// to users debugging preamble mistakes. See issue 8442.
 		preambleErrors := p.gccErrors([]byte(f.Preamble))
 		if len(preambleErrors) > 0 {
 			error_(token.NoPos, "\n%s errors for preamble:\n%s", p.gccBaseCmd()[0], preambleErrors)
@@ -402,7 +419,7 @@ func (p *Package) guessKinds(f *File) []*Name {
 // being referred to as C.xxx.
 func (p *Package) loadDWARF(f *File, names []*Name) {
 	// Extract the types from the DWARF section of an object
-	// from a well-formed C program.  Gcc only generates DWARF info
+	// from a well-formed C program. Gcc only generates DWARF info
 	// for symbols in the object file, so it is not enough to print the
 	// preamble and hope the symbols we care about will be there.
 	// Instead, emit
@@ -412,6 +429,7 @@ func (p *Package) loadDWARF(f *File, names []*Name) {
 	var b bytes.Buffer
 	b.WriteString(f.Preamble)
 	b.WriteString(builtinProlog)
+	b.WriteString("#line 1 \"cgo-dwarf-inference\"\n")
 	for i, n := range names {
 		fmt.Fprintf(&b, "__typeof__(%s) *__cgo__%d;\n", n.C, i)
 		if n.Kind == "const" {
@@ -420,7 +438,7 @@ func (p *Package) loadDWARF(f *File, names []*Name) {
 	}
 
 	// Apple's LLVM-based gcc does not include the enumeration
-	// names and values in its DWARF debug output.  In case we're
+	// names and values in its DWARF debug output. In case we're
 	// using such a gcc, create a data block initialized with the values.
 	// We can read them out of the object file.
 	fmt.Fprintf(&b, "long long __cgodebug_data[] = {\n")
@@ -431,7 +449,7 @@ func (p *Package) loadDWARF(f *File, names []*Name) {
 			fmt.Fprintf(&b, "\t0,\n")
 		}
 	}
-	// for the last entry, we can not use 0, otherwise
+	// for the last entry, we cannot use 0, otherwise
 	// in case all __cgodebug_data is zero initialized,
 	// LLVM-based gcc will place the it in the __DATA.__common
 	// zero-filled section (our debug/macho doesn't support
@@ -575,9 +593,439 @@ func (p *Package) mangleName(n *Name) {
 	n.Mangle = prefix + n.Kind + "_" + n.Go
 }
 
+// rewriteCalls rewrites all calls that pass pointers to check that
+// they follow the rules for passing pointers between Go and C.
+// This returns whether the package needs to import unsafe as _cgo_unsafe.
+func (p *Package) rewriteCalls(f *File) bool {
+	needsUnsafe := false
+	for _, call := range f.Calls {
+		// This is a call to C.xxx; set goname to "xxx".
+		goname := call.Call.Fun.(*ast.SelectorExpr).Sel.Name
+		if goname == "malloc" {
+			continue
+		}
+		name := f.Name[goname]
+		if name.Kind != "func" {
+			// Probably a type conversion.
+			continue
+		}
+		if p.rewriteCall(f, call, name) {
+			needsUnsafe = true
+		}
+	}
+	return needsUnsafe
+}
+
+// rewriteCall rewrites one call to add pointer checks.
+// If any pointer checks are required, we rewrite the call into a
+// function literal that calls _cgoCheckPointer for each pointer
+// argument and then calls the original function.
+// This returns whether the package needs to import unsafe as _cgo_unsafe.
+func (p *Package) rewriteCall(f *File, call *Call, name *Name) bool {
+	// Avoid a crash if the number of arguments is
+	// less than the number of parameters.
+	// This will be caught when the generated file is compiled.
+	if len(call.Call.Args) < len(name.FuncType.Params) {
+		return false
+	}
+
+	any := false
+	for i, param := range name.FuncType.Params {
+		if p.needsPointerCheck(f, param.Go, call.Call.Args[i]) {
+			any = true
+			break
+		}
+	}
+	if !any {
+		return false
+	}
+
+	// We need to rewrite this call.
+	//
+	// We are going to rewrite C.f(p) to
+	//    func (_cgo0 ptype) {
+	//            _cgoCheckPointer(_cgo0)
+	//            C.f(_cgo0)
+	//    }(p)
+	// Using a function literal like this lets us do correct
+	// argument type checking, and works correctly if the call is
+	// deferred.
+	needsUnsafe := false
+	params := make([]*ast.Field, len(name.FuncType.Params))
+	nargs := make([]ast.Expr, len(name.FuncType.Params))
+	var stmts []ast.Stmt
+	for i, param := range name.FuncType.Params {
+		// params is going to become the parameters of the
+		// function literal.
+		// nargs is going to become the list of arguments made
+		// by the call within the function literal.
+		// nparam is the parameter of the function literal that
+		// corresponds to param.
+
+		origArg := call.Call.Args[i]
+		nparam := ast.NewIdent(fmt.Sprintf("_cgo%d", i))
+		nargs[i] = nparam
+
+		// The Go version of the C type might use unsafe.Pointer,
+		// but the file might not import unsafe.
+		// Rewrite the Go type if necessary to use _cgo_unsafe.
+		ptype := p.rewriteUnsafe(param.Go)
+		if ptype != param.Go {
+			needsUnsafe = true
+		}
+
+		params[i] = &ast.Field{
+			Names: []*ast.Ident{nparam},
+			Type:  ptype,
+		}
+
+		if !p.needsPointerCheck(f, param.Go, origArg) {
+			continue
+		}
+
+		// Run the cgo pointer checks on nparam.
+
+		// Change the function literal to call the real function
+		// with the parameter passed through _cgoCheckPointer.
+		c := &ast.CallExpr{
+			Fun: ast.NewIdent("_cgoCheckPointer"),
+			Args: []ast.Expr{
+				nparam,
+			},
+		}
+
+		// Add optional additional arguments for an address
+		// expression.
+		c.Args = p.checkAddrArgs(f, c.Args, origArg)
+
+		stmt := &ast.ExprStmt{
+			X: c,
+		}
+		stmts = append(stmts, stmt)
+	}
+
+	fcall := &ast.CallExpr{
+		Fun:  call.Call.Fun,
+		Args: nargs,
+	}
+	ftype := &ast.FuncType{
+		Params: &ast.FieldList{
+			List: params,
+		},
+	}
+	if name.FuncType.Result != nil {
+		rtype := p.rewriteUnsafe(name.FuncType.Result.Go)
+		if rtype != name.FuncType.Result.Go {
+			needsUnsafe = true
+		}
+		ftype.Results = &ast.FieldList{
+			List: []*ast.Field{
+				&ast.Field{
+					Type: rtype,
+				},
+			},
+		}
+	}
+
+	// There is a Ref pointing to the old call.Call.Fun.
+	for _, ref := range f.Ref {
+		if ref.Expr == &call.Call.Fun {
+			ref.Expr = &fcall.Fun
+
+			// If this call expects two results, we have to
+			// adjust the results of the function we generated.
+			if ref.Context == "call2" {
+				if ftype.Results == nil {
+					// An explicit void argument
+					// looks odd but it seems to
+					// be how cgo has worked historically.
+					ftype.Results = &ast.FieldList{
+						List: []*ast.Field{
+							&ast.Field{
+								Type: ast.NewIdent("_Ctype_void"),
+							},
+						},
+					}
+				}
+				ftype.Results.List = append(ftype.Results.List,
+					&ast.Field{
+						Type: ast.NewIdent("error"),
+					})
+			}
+		}
+	}
+
+	var fbody ast.Stmt
+	if ftype.Results == nil {
+		fbody = &ast.ExprStmt{
+			X: fcall,
+		}
+	} else {
+		fbody = &ast.ReturnStmt{
+			Results: []ast.Expr{fcall},
+		}
+	}
+	call.Call.Fun = &ast.FuncLit{
+		Type: ftype,
+		Body: &ast.BlockStmt{
+			List: append(stmts, fbody),
+		},
+	}
+	call.Call.Lparen = token.NoPos
+	call.Call.Rparen = token.NoPos
+
+	return needsUnsafe
+}
+
+// needsPointerCheck returns whether the type t needs a pointer check.
+// This is true if t is a pointer and if the value to which it points
+// might contain a pointer.
+func (p *Package) needsPointerCheck(f *File, t ast.Expr, arg ast.Expr) bool {
+	// An untyped nil does not need a pointer check, and when
+	// _cgoCheckPointer returns the untyped nil the type assertion we
+	// are going to insert will fail.  Easier to just skip nil arguments.
+	// TODO: Note that this fails if nil is shadowed.
+	if id, ok := arg.(*ast.Ident); ok && id.Name == "nil" {
+		return false
+	}
+
+	return p.hasPointer(f, t, true)
+}
+
+// hasPointer is used by needsPointerCheck. If top is true it returns
+// whether t is or contains a pointer that might point to a pointer.
+// If top is false it returns whether t is or contains a pointer.
+// f may be nil.
+func (p *Package) hasPointer(f *File, t ast.Expr, top bool) bool {
+	switch t := t.(type) {
+	case *ast.ArrayType:
+		if t.Len == nil {
+			if !top {
+				return true
+			}
+			return p.hasPointer(f, t.Elt, false)
+		}
+		return p.hasPointer(f, t.Elt, top)
+	case *ast.StructType:
+		for _, field := range t.Fields.List {
+			if p.hasPointer(f, field.Type, top) {
+				return true
+			}
+		}
+		return false
+	case *ast.StarExpr: // Pointer type.
+		if !top {
+			return true
+		}
+		// Check whether this is a pointer to a C union (or class)
+		// type that contains a pointer.
+		if unionWithPointer[t.X] {
+			return true
+		}
+		return p.hasPointer(f, t.X, false)
+	case *ast.FuncType, *ast.InterfaceType, *ast.MapType, *ast.ChanType:
+		return true
+	case *ast.Ident:
+		// TODO: Handle types defined within function.
+		for _, d := range p.Decl {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				if ts.Name.Name == t.Name {
+					return p.hasPointer(f, ts.Type, top)
+				}
+			}
+		}
+		if def := typedef[t.Name]; def != nil {
+			return p.hasPointer(f, def.Go, top)
+		}
+		if t.Name == "string" {
+			return !top
+		}
+		if t.Name == "error" {
+			return true
+		}
+		if goTypes[t.Name] != nil {
+			return false
+		}
+		// We can't figure out the type. Conservative
+		// approach is to assume it has a pointer.
+		return true
+	case *ast.SelectorExpr:
+		if l, ok := t.X.(*ast.Ident); !ok || l.Name != "C" {
+			// Type defined in a different package.
+			// Conservative approach is to assume it has a
+			// pointer.
+			return true
+		}
+		if f == nil {
+			// Conservative approach: assume pointer.
+			return true
+		}
+		name := f.Name[t.Sel.Name]
+		if name != nil && name.Kind == "type" && name.Type != nil && name.Type.Go != nil {
+			return p.hasPointer(f, name.Type.Go, top)
+		}
+		// We can't figure out the type. Conservative
+		// approach is to assume it has a pointer.
+		return true
+	default:
+		error_(t.Pos(), "could not understand type %s", gofmt(t))
+		return true
+	}
+}
+
+// checkAddrArgs tries to add arguments to the call of
+// _cgoCheckPointer when the argument is an address expression. We
+// pass true to mean that the argument is an address operation of
+// something other than a slice index, which means that it's only
+// necessary to check the specific element pointed to, not the entire
+// object. This is for &s.f, where f is a field in a struct. We can
+// pass a slice or array, meaning that we should check the entire
+// slice or array but need not check any other part of the object.
+// This is for &s.a[i], where we need to check all of a. However, we
+// only pass the slice or array if we can refer to it without side
+// effects.
+func (p *Package) checkAddrArgs(f *File, args []ast.Expr, x ast.Expr) []ast.Expr {
+	// Strip type conversions.
+	for {
+		c, ok := x.(*ast.CallExpr)
+		if !ok || len(c.Args) != 1 || !p.isType(c.Fun) {
+			break
+		}
+		x = c.Args[0]
+	}
+	u, ok := x.(*ast.UnaryExpr)
+	if !ok || u.Op != token.AND {
+		return args
+	}
+	index, ok := u.X.(*ast.IndexExpr)
+	if !ok {
+		// This is the address of something that is not an
+		// index expression. We only need to examine the
+		// single value to which it points.
+		// TODO: what if true is shadowed?
+		return append(args, ast.NewIdent("true"))
+	}
+	if !p.hasSideEffects(f, index.X) {
+		// Examine the entire slice.
+		return append(args, index.X)
+	}
+	// Treat the pointer as unknown.
+	return args
+}
+
+// hasSideEffects returns whether the expression x has any side
+// effects.  x is an expression, not a statement, so the only side
+// effect is a function call.
+func (p *Package) hasSideEffects(f *File, x ast.Expr) bool {
+	found := false
+	f.walk(x, "expr",
+		func(f *File, x interface{}, context string) {
+			switch x.(type) {
+			case *ast.CallExpr:
+				found = true
+			}
+		})
+	return found
+}
+
+// isType returns whether the expression is definitely a type.
+// This is conservative--it returns false for an unknown identifier.
+func (p *Package) isType(t ast.Expr) bool {
+	switch t := t.(type) {
+	case *ast.SelectorExpr:
+		id, ok := t.X.(*ast.Ident)
+		if !ok {
+			return false
+		}
+		if id.Name == "unsafe" && t.Sel.Name == "Pointer" {
+			return true
+		}
+		if id.Name == "C" && typedef["_Ctype_"+t.Sel.Name] != nil {
+			return true
+		}
+		return false
+	case *ast.Ident:
+		// TODO: This ignores shadowing.
+		switch t.Name {
+		case "unsafe.Pointer", "bool", "byte",
+			"complex64", "complex128",
+			"error",
+			"float32", "float64",
+			"int", "int8", "int16", "int32", "int64",
+			"rune", "string",
+			"uint", "uint8", "uint16", "uint32", "uint64", "uintptr":
+
+			return true
+		}
+	case *ast.StarExpr:
+		return p.isType(t.X)
+	case *ast.ArrayType, *ast.StructType, *ast.FuncType, *ast.InterfaceType,
+		*ast.MapType, *ast.ChanType:
+
+		return true
+	}
+	return false
+}
+
+// rewriteUnsafe returns a version of t with references to unsafe.Pointer
+// rewritten to use _cgo_unsafe.Pointer instead.
+func (p *Package) rewriteUnsafe(t ast.Expr) ast.Expr {
+	switch t := t.(type) {
+	case *ast.Ident:
+		// We don't see a SelectorExpr for unsafe.Pointer;
+		// this is created by code in this file.
+		if t.Name == "unsafe.Pointer" {
+			return ast.NewIdent("_cgo_unsafe.Pointer")
+		}
+	case *ast.ArrayType:
+		t1 := p.rewriteUnsafe(t.Elt)
+		if t1 != t.Elt {
+			r := *t
+			r.Elt = t1
+			return &r
+		}
+	case *ast.StructType:
+		changed := false
+		fields := *t.Fields
+		fields.List = nil
+		for _, f := range t.Fields.List {
+			ft := p.rewriteUnsafe(f.Type)
+			if ft == f.Type {
+				fields.List = append(fields.List, f)
+			} else {
+				fn := *f
+				fn.Type = ft
+				fields.List = append(fields.List, &fn)
+				changed = true
+			}
+		}
+		if changed {
+			r := *t
+			r.Fields = &fields
+			return &r
+		}
+	case *ast.StarExpr: // Pointer type.
+		x1 := p.rewriteUnsafe(t.X)
+		if x1 != t.X {
+			r := *t
+			r.X = x1
+			return &r
+		}
+	}
+	return t
+}
+
 // rewriteRef rewrites all the C.xxx references in f.AST to refer to the
 // Go equivalents, now that we have figured out the meaning of all
-// the xxx.  In *godefs mode, rewriteRef replaces the names
+// the xxx. In *godefs mode, rewriteRef replaces the names
 // with full definitions instead of mangled names.
 func (p *Package) rewriteRef(f *File) {
 	// Keep a list of all the functions, to remove the ones
@@ -600,7 +1048,7 @@ func (p *Package) rewriteRef(f *File) {
 
 	// Now that we have all the name types filled in,
 	// scan through the Refs to identify the ones that
-	// are trying to do a ,err call.  Also check that
+	// are trying to do a ,err call. Also check that
 	// functions are only used in calls.
 	for _, r := range f.Ref {
 		if r.Name.Kind == "const" && r.Name.Const == "" {
@@ -612,6 +1060,10 @@ func (p *Package) rewriteRef(f *File) {
 			if r.Name.Kind != "func" {
 				if r.Name.Kind == "type" {
 					r.Context = "type"
+					if r.Name.Type == nil {
+						error_(r.Pos(), "invalid conversion to C.%s: undefined C type '%s'", fixGo(r.Name.Go), r.Name.C)
+						break
+					}
 					expr = r.Name.Type.Go
 					break
 				}
@@ -654,7 +1106,7 @@ func (p *Package) rewriteRef(f *File) {
 					f.Name[fpName] = name
 				}
 				r.Name = name
-				// Rewrite into call to _Cgo_ptr to prevent assignments.  The _Cgo_ptr
+				// Rewrite into call to _Cgo_ptr to prevent assignments. The _Cgo_ptr
 				// function is defined in out.go and simply returns its argument. See
 				// issue 7757.
 				expr = &ast.CallExpr{
@@ -663,6 +1115,10 @@ func (p *Package) rewriteRef(f *File) {
 				}
 			} else if r.Name.Kind == "type" {
 				// Okay - might be new(T)
+				if r.Name.Type == nil {
+					error_(r.Pos(), "expression C.%s: undefined C type '%s'", fixGo(r.Name.Go), r.Name.C)
+					break
+				}
 				expr = r.Name.Type.Go
 			} else if r.Name.Kind == "var" {
 				expr = &ast.StarExpr{Star: (*r.Expr).Pos(), X: expr}
@@ -672,7 +1128,7 @@ func (p *Package) rewriteRef(f *File) {
 			if r.Name.Kind == "var" {
 				expr = &ast.StarExpr{Star: (*r.Expr).Pos(), X: expr}
 			} else {
-				error_(r.Pos(), "only C variables allowed in selector expression", fixGo(r.Name.Go))
+				error_(r.Pos(), "only C variables allowed in selector expression %s", fixGo(r.Name.Go))
 			}
 
 		case "type":
@@ -752,6 +1208,10 @@ func (p *Package) gccMachine() []string {
 		return []string{"-m31"}
 	case "s390x":
 		return []string{"-m64"}
+	case "mips64", "mips64le":
+		return []string{"-mabi=64"}
+	case "mips", "mipsle":
+		return []string{"-mabi=32"}
 	}
 	return nil
 }
@@ -818,7 +1278,7 @@ func (p *Package) gccDebug(stdin []byte) (*dwarf.Data, binary.ByteOrder, []byte)
 			for i := range f.Symtab.Syms {
 				s := &f.Symtab.Syms[i]
 				if isDebugData(s.Name) {
-					// Found it.  Now find data section.
+					// Found it. Now find data section.
 					if i := int(s.Sect) - 1; 0 <= i && i < len(f.Sections) {
 						sect := f.Sections[i]
 						if sect.Addr <= s.Value && s.Value < sect.Addr+sect.Size {
@@ -845,7 +1305,7 @@ func (p *Package) gccDebug(stdin []byte) (*dwarf.Data, binary.ByteOrder, []byte)
 			for i := range symtab {
 				s := &symtab[i]
 				if isDebugData(s.Name) {
-					// Found it.  Now find data section.
+					// Found it. Now find data section.
 					if i := int(s.Section); 0 <= i && i < len(f.Sections) {
 						sect := f.Sections[i]
 						if sect.Addr <= s.Value && s.Value < sect.Addr+sect.Size {
@@ -898,18 +1358,26 @@ func (p *Package) gccDefines(stdin []byte) string {
 }
 
 // gccErrors runs gcc over the C program stdin and returns
-// the errors that gcc prints.  That is, this function expects
+// the errors that gcc prints. That is, this function expects
 // gcc to fail.
 func (p *Package) gccErrors(stdin []byte) string {
 	// TODO(rsc): require failure
 	args := p.gccCmd()
 
+	// Optimization options can confuse the error messages; remove them.
+	nargs := make([]string, 0, len(args))
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-O") {
+			nargs = append(nargs, arg)
+		}
+	}
+
 	if *debugGcc {
-		fmt.Fprintf(os.Stderr, "$ %s <<EOF\n", strings.Join(args, " "))
+		fmt.Fprintf(os.Stderr, "$ %s <<EOF\n", strings.Join(nargs, " "))
 		os.Stderr.Write(stdin)
 		fmt.Fprint(os.Stderr, "EOF\n")
 	}
-	stdout, stderr, _ := run(stdin, args)
+	stdout, stderr, _ := run(stdin, nargs)
 	if *debugGcc {
 		os.Stderr.Write(stdout)
 		os.Stderr.Write(stderr)
@@ -945,8 +1413,7 @@ func runGcc(stdin []byte, args []string) (string, string) {
 // with equivalent memory layout.
 type typeConv struct {
 	// Cache of already-translated or in-progress types.
-	m       map[dwarf.Type]*Type
-	typedef map[string]ast.Expr
+	m map[dwarf.Type]*Type
 
 	// Map from types to incomplete pointers to those types.
 	ptrs map[dwarf.Type][]*Type
@@ -972,6 +1439,10 @@ type typeConv struct {
 var tagGen int
 var typedef = make(map[string]*Type)
 var goIdent = make(map[string]*ast.Ident)
+
+// unionWithPointer is true for a Go type that represents a C union (or class)
+// that may contain a pointer. This is used for cgo pointer checking.
+var unionWithPointer = make(map[ast.Expr]bool)
 
 func (c *typeConv) Init(ptrSize, intSize int64) {
 	c.ptrSize = ptrSize
@@ -1022,23 +1493,36 @@ func base(dt dwarf.Type) dwarf.Type {
 	return dt
 }
 
+// unqual strips away qualifiers from a DWARF type.
+// In general we don't care about top-level qualifiers.
+func unqual(dt dwarf.Type) dwarf.Type {
+	for {
+		if d, ok := dt.(*dwarf.QualType); ok {
+			dt = d.Type
+		} else {
+			break
+		}
+	}
+	return dt
+}
+
 // Map from dwarf text names to aliases we use in package "C".
 var dwarfToName = map[string]string{
 	"long int":               "long",
 	"long unsigned int":      "ulong",
 	"unsigned int":           "uint",
 	"short unsigned int":     "ushort",
+	"unsigned short":         "ushort", // Used by Clang; issue 13129.
 	"short int":              "short",
 	"long long int":          "longlong",
 	"long long unsigned int": "ulonglong",
 	"signed char":            "schar",
-	"float complex":          "complexfloat",
-	"double complex":         "complexdouble",
+	"unsigned char":          "uchar",
 }
 
 const signedDelta = 64
 
-// String returns the current type representation.  Format arguments
+// String returns the current type representation. Format arguments
 // are assembled within this method so that any changes in mutable
 // values are taken into account.
 func (tr *TypeRepr) String() string {
@@ -1199,7 +1683,7 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 		case 16:
 			t.Go = c.complex128
 		}
-		if t.Align = t.Size; t.Align >= c.ptrSize {
+		if t.Align = t.Size / 2; t.Align >= c.ptrSize {
 			t.Align = c.ptrSize
 		}
 
@@ -1224,6 +1708,11 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 			t.Go = c.int32
 		case 8:
 			t.Go = c.int64
+		case 16:
+			t.Go = &ast.ArrayType{
+				Len: c.intExpr(t.Size),
+				Elt: c.uint8,
+			}
 		}
 		if t.Align = t.Size; t.Align >= c.ptrSize {
 			t.Align = c.ptrSize
@@ -1240,6 +1729,15 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 		if _, ok := base(dt.Type).(*dwarf.VoidType); ok {
 			t.Go = c.goVoidPtr
 			t.C.Set("void*")
+			dq := dt.Type
+			for {
+				if d, ok := dq.(*dwarf.QualType); ok {
+					t.C.Set(d.Qual + " " + t.C.String())
+					dq = d.Type
+				} else {
+					break
+				}
+			}
 			break
 		}
 
@@ -1252,9 +1750,16 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 		c.ptrs[dt.Type] = append(c.ptrs[dt.Type], t)
 
 	case *dwarf.QualType:
-		// Ignore qualifier.
-		t = c.Type(dt.Type, pos)
-		c.m[dtype] = t
+		t1 := c.Type(dt.Type, pos)
+		t.Size = t1.Size
+		t.Align = t1.Align
+		t.Go = t1.Go
+		if unionWithPointer[t1.Go] {
+			unionWithPointer[t.Go] = true
+		}
+		t.EnumValues = nil
+		t.Typedef = ""
+		t.C.Set("%s "+dt.Qual, t1.C)
 		return t
 
 	case *dwarf.StructType:
@@ -1286,6 +1791,9 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 		switch dt.Kind {
 		case "class", "union":
 			t.Go = c.Opaque(t.Size)
+			if c.dwarfHasPointer(dt, pos) {
+				unionWithPointer[t.Go] = true
+			}
 			if t.C.Empty() {
 				t.C.Set("__typeof__(unsigned char[%d])", t.Size)
 			}
@@ -1328,6 +1836,9 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 		goIdent[name.Name] = name
 		sub := c.Type(dt.Type, pos)
 		t.Go = name
+		if unionWithPointer[sub.Go] {
+			unionWithPointer[t.Go] = true
+		}
 		t.Size = sub.Size
 		t.Align = sub.Align
 		oldType := typedef[name.Name]
@@ -1381,6 +1892,11 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 			t.Go = c.uint32
 		case 8:
 			t.Go = c.uint64
+		case 16:
+			t.Go = &ast.ArrayType{
+				Len: c.intExpr(t.Size),
+				Elt: c.uint8,
+			}
 		}
 		if t.Align = t.Size; t.Align >= c.ptrSize {
 			t.Align = c.ptrSize
@@ -1393,7 +1909,7 @@ func (c *typeConv) Type(dtype dwarf.Type, pos token.Pos) *Type {
 	}
 
 	switch dtype.(type) {
-	case *dwarf.AddrType, *dwarf.BoolType, *dwarf.CharType, *dwarf.IntType, *dwarf.FloatType, *dwarf.UcharType, *dwarf.UintType:
+	case *dwarf.AddrType, *dwarf.BoolType, *dwarf.CharType, *dwarf.ComplexType, *dwarf.IntType, *dwarf.FloatType, *dwarf.UcharType, *dwarf.UintType:
 		s := dtype.Common().Name
 		if s != "" {
 			if ss, ok := dwarfToName[s]; ok {
@@ -1453,7 +1969,7 @@ func isStructUnionClass(x ast.Expr) bool {
 // FuncArg returns a Go type with the same memory layout as
 // dtype when used as the type of a C function argument.
 func (c *typeConv) FuncArg(dtype dwarf.Type, pos token.Pos) *Type {
-	t := c.Type(dtype, pos)
+	t := c.Type(unqual(dtype), pos)
 	switch dt := dtype.(type) {
 	case *dwarf.ArrayType:
 		// Arrays are passed implicitly as pointers in C.
@@ -1468,7 +1984,7 @@ func (c *typeConv) FuncArg(dtype dwarf.Type, pos token.Pos) *Type {
 		}
 	case *dwarf.TypedefType:
 		// C has much more relaxed rules than Go for
-		// implicit type conversions.  When the parameter
+		// implicit type conversions. When the parameter
 		// is type T defined as *X, simulate a little of the
 		// laxness of C by making the argument *X instead of T.
 		if ptr, ok := base(dt.Type).(*dwarf.PtrType); ok {
@@ -1483,9 +1999,12 @@ func (c *typeConv) FuncArg(dtype dwarf.Type, pos token.Pos) *Type {
 				return nil
 			}
 
-			// Remember the C spelling, in case the struct
-			// has __attribute__((unavailable)) on it.  See issue 2888.
-			t.Typedef = dt.Name
+			// For a struct/union/class, remember the C spelling,
+			// in case it has __attribute__((unavailable)).
+			// See issue 2888.
+			if isStructUnionClass(t.Go) {
+				t.Typedef = dt.Name
+			}
 		}
 	}
 	return t
@@ -1499,7 +2018,7 @@ func (c *typeConv) FuncType(dtype *dwarf.FuncType, pos token.Pos) *FuncType {
 	for i, f := range dtype.ParamType {
 		// gcc's DWARF generator outputs a single DotDotDotType parameter for
 		// function pointers that specify no parameters (e.g. void
-		// (*__cgo_0)()).  Treat this special case as void.  This case is
+		// (*__cgo_0)()).  Treat this special case as void. This case is
 		// invalid according to ISO C anyway (i.e. void (*__cgo_1)(...) is not
 		// legal).
 		if _, ok := f.(*dwarf.DotDotDotType); ok && i == 0 {
@@ -1514,7 +2033,7 @@ func (c *typeConv) FuncType(dtype *dwarf.FuncType, pos token.Pos) *FuncType {
 	if _, ok := dtype.ReturnType.(*dwarf.VoidType); ok {
 		gr = []*ast.Field{{Type: c.goVoid}}
 	} else if dtype.ReturnType != nil {
-		r = c.Type(dtype.ReturnType, pos)
+		r = c.Type(unqual(dtype.ReturnType), pos)
 		gr = []*ast.Field{{Type: r.Go}}
 	}
 	return &FuncType{
@@ -1570,8 +2089,8 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 	off := int64(0)
 
 	// Rename struct fields that happen to be named Go keywords into
-	// _{keyword}.  Create a map from C ident -> Go ident.  The Go ident will
-	// be mangled.  Any existing identifier that already has the same name on
+	// _{keyword}.  Create a map from C ident -> Go ident. The Go ident will
+	// be mangled. Any existing identifier that already has the same name on
 	// the C-side will cause the Go-mangled version to be prefixed with _.
 	// (e.g. in a struct with fields '_type' and 'type', the latter would be
 	// rendered as '__type' in Go).
@@ -1611,7 +2130,7 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 
 		// In godefs mode, if this field is a C11
 		// anonymous union then treat the first field in the
-		// union as the field in the struct.  This handles
+		// union as the field in the struct. This handles
 		// cases like the glibc <sys/resource.h> file; see
 		// issue 6677.
 		if *godefs {
@@ -1681,7 +2200,7 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 	// We can't permit that, because then the size of the Go
 	// struct will not be the same as the size of the C struct.
 	// Our only option in such a case is to remove the field,
-	// which means that it can not be referenced from Go.
+	// which means that it cannot be referenced from Go.
 	for off > 0 && sizes[len(sizes)-1] == 0 {
 		n := len(sizes)
 		fld = fld[0 : n-1]
@@ -1699,6 +2218,44 @@ func (c *typeConv) Struct(dt *dwarf.StructType, pos token.Pos) (expr *ast.Struct
 	}
 	expr = &ast.StructType{Fields: &ast.FieldList{List: fld}}
 	return
+}
+
+// dwarfHasPointer returns whether the DWARF type dt contains a pointer.
+func (c *typeConv) dwarfHasPointer(dt dwarf.Type, pos token.Pos) bool {
+	switch dt := dt.(type) {
+	default:
+		fatalf("%s: unexpected type: %s", lineno(pos), dt)
+		return false
+
+	case *dwarf.AddrType, *dwarf.BoolType, *dwarf.CharType, *dwarf.EnumType,
+		*dwarf.FloatType, *dwarf.ComplexType, *dwarf.FuncType,
+		*dwarf.IntType, *dwarf.UcharType, *dwarf.UintType, *dwarf.VoidType:
+
+		return false
+
+	case *dwarf.ArrayType:
+		return c.dwarfHasPointer(dt.Type, pos)
+
+	case *dwarf.PtrType:
+		return true
+
+	case *dwarf.QualType:
+		return c.dwarfHasPointer(dt.Type, pos)
+
+	case *dwarf.StructType:
+		for _, f := range dt.Field {
+			if c.dwarfHasPointer(f.Type, pos) {
+				return true
+			}
+		}
+		return false
+
+	case *dwarf.TypedefType:
+		if dt.Name == "_GoString_" || dt.Name == "_GoBytes_" {
+			return true
+		}
+		return c.dwarfHasPointer(dt.Type, pos)
+	}
 }
 
 func upper(s string) string {
@@ -1735,7 +2292,7 @@ func godefsFields(fld []*ast.Field) {
 }
 
 // fieldPrefix returns the prefix that should be removed from all the
-// field names when generating the C or Go code.  For generated
+// field names when generating the C or Go code. For generated
 // C, we leave the names as is (tv_sec, tv_usec), since that's what
 // people are used to seeing in C.  For generated Go code, such as
 // package syscall's data structures, we drop a common prefix
@@ -1745,7 +2302,7 @@ func fieldPrefix(fld []*ast.Field) string {
 	for _, f := range fld {
 		for _, n := range f.Names {
 			// Ignore field names that don't have the prefix we're
-			// looking for.  It is common in C headers to have fields
+			// looking for. It is common in C headers to have fields
 			// named, say, _pad in an otherwise prefixed header.
 			// If the struct has 3 fields tv_sec, tv_usec, _pad1, then we
 			// still want to remove the tv_ prefix.

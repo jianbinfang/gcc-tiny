@@ -1,5 +1,5 @@
 ;; Machine description for AArch64 architecture.
-;; Copyright (C) 2009-2015 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2017 Free Software Foundation, Inc.
 ;; Contributed by ARM Ltd.
 ;;
 ;; This file is part of GCC.
@@ -43,23 +43,6 @@
   (ior (match_operand 0 "register_operand")
        (match_operand 0 "aarch64_ccmp_immediate")))
 
-(define_special_predicate "ccmp_cc_register"
-  (and (match_code "reg")
-       (and (match_test "REGNO (op) == CC_REGNUM")
-	    (ior (match_test "mode == GET_MODE (op)")
-		 (match_test "mode == VOIDmode
-			      && (GET_MODE (op) == CC_DNEmode
-				  || GET_MODE (op) == CC_DEQmode
-				  || GET_MODE (op) == CC_DLEmode
-				  || GET_MODE (op) == CC_DLTmode
-				  || GET_MODE (op) == CC_DGEmode
-				  || GET_MODE (op) == CC_DGTmode
-				  || GET_MODE (op) == CC_DLEUmode
-				  || GET_MODE (op) == CC_DLTUmode
-				  || GET_MODE (op) == CC_DGEUmode
-				  || GET_MODE (op) == CC_DGTUmode)"))))
-)
-
 (define_predicate "aarch64_simd_register"
   (and (match_code "reg")
        (ior (match_test "REGNO_REG_CLASS (REGNO (op)) == FP_LO_REGS")
@@ -71,9 +54,9 @@
 	    (match_test "op == const0_rtx"))))
 
 (define_predicate "aarch64_reg_or_fp_zero"
-  (and (match_code "reg,subreg,const_double")
-       (ior (match_operand 0 "register_operand")
-	    (match_test "aarch64_float_const_zero_rtx_p (op)"))))
+  (ior (match_operand 0 "register_operand")
+	(and (match_code "const_double")
+	     (match_test "aarch64_float_const_zero_rtx_p (op)"))))
 
 (define_predicate "aarch64_reg_zero_or_m1_or_1"
   (and (match_code "reg,subreg,const_int")
@@ -107,6 +90,10 @@
   (and (match_code "const_int")
        (match_test "(INTVAL (op) < 0xffffff && INTVAL (op) > -0xffffff)")))
 
+(define_predicate "aarch64_pluslong_strict_immedate"
+  (and (match_operand 0 "aarch64_pluslong_immediate")
+       (not (match_operand 0 "aarch64_plus_immediate"))))
+
 (define_predicate "aarch64_pluslong_operand"
   (ior (match_operand 0 "register_operand")
        (match_operand 0 "aarch64_pluslong_immediate")))
@@ -118,6 +105,10 @@
 (define_predicate "aarch64_logical_operand"
   (ior (match_operand 0 "register_operand")
        (match_operand 0 "aarch64_logical_immediate")))
+
+(define_predicate "aarch64_logical_and_immediate"
+  (and (match_code "const_int")
+       (match_test "aarch64_and_bitmask_imm (INTVAL (op), mode)")))
 
 (define_predicate "aarch64_shift_imm_si"
   (and (match_code "const_int")
@@ -193,6 +184,7 @@
 	  || GET_CODE (XEXP (op, 1)) != CONST_INT)
 	return false;
       op = XEXP (op, 0);
+      /* FALLTHRU */
 
     case SYMBOL_REF:
       return SYMBOL_REF_TLS_MODEL (op) == TLS_MODEL_INITIAL_EXEC;
@@ -214,6 +206,7 @@
 	  || GET_CODE (XEXP (op, 1)) != CONST_INT)
 	return false;
       op = XEXP (op, 0);
+      /* FALLTHRU */
 
     case SYMBOL_REF:
       return SYMBOL_REF_TLS_MODEL (op) == TLS_MODEL_LOCAL_EXEC;
@@ -242,10 +235,19 @@
 
 ;; True for integer comparisons and for FP comparisons other than LTGT or UNEQ.
 (define_special_predicate "aarch64_comparison_operator"
-  (match_code "eq,ne,le,lt,ge,gt,geu,gtu,leu,ltu,unordered,ordered,unlt,unle,unge,ungt"))
+  (match_code "eq,ne,le,lt,ge,gt,geu,gtu,leu,ltu,unordered,
+	       ordered,unlt,unle,unge,ungt"))
+
+;; Same as aarch64_comparison_operator but don't ignore the mode.
+;; RTL SET operations require their operands source and destination have
+;; the same modes, so we can't ignore the modes there.  See PR target/69161.
+(define_predicate "aarch64_comparison_operator_mode"
+  (match_code "eq,ne,le,lt,ge,gt,geu,gtu,leu,ltu,unordered,
+	       ordered,unlt,unle,unge,ungt"))
 
 (define_special_predicate "aarch64_comparison_operation"
-  (match_code "eq,ne,le,lt,ge,gt,geu,gtu,leu,ltu,unordered,ordered,unlt,unle,unge,ungt")
+  (match_code "eq,ne,le,lt,ge,gt,geu,gtu,leu,ltu,unordered,
+	       ordered,unlt,unle,unge,ungt")
 {
   if (XEXP (op, 1) != const0_rtx)
     return false;
@@ -255,6 +257,25 @@
   return aarch64_get_condition_code (op) >= 0;
 })
 
+(define_special_predicate "aarch64_carry_operation"
+  (match_code "ne,geu")
+{
+  if (XEXP (op, 1) != const0_rtx)
+    return false;
+  machine_mode ccmode = (GET_CODE (op) == NE ? CC_Cmode : CCmode);
+  rtx op0 = XEXP (op, 0);
+  return REG_P (op0) && REGNO (op0) == CC_REGNUM && GET_MODE (op0) == ccmode;
+})
+
+(define_special_predicate "aarch64_borrow_operation"
+  (match_code "eq,ltu")
+{
+  if (XEXP (op, 1) != const0_rtx)
+    return false;
+  machine_mode ccmode = (GET_CODE (op) == EQ ? CC_Cmode : CCmode);
+  rtx op0 = XEXP (op, 0);
+  return REG_P (op0) && REGNO (op0) == CC_REGNUM && GET_MODE (op0) == ccmode;
+})
 
 ;; True if the operand is memory reference suitable for a load/store exclusive.
 (define_predicate "aarch64_sync_memory_operand"
@@ -287,7 +308,7 @@
 })
 
 (define_predicate "aarch64_simd_reg_or_zero"
-  (and (match_code "reg,subreg,const_int,const_vector")
+  (and (match_code "reg,subreg,const_int,const_double,const_vector")
        (ior (match_operand 0 "register_operand")
            (ior (match_test "op == const0_rtx")
                 (match_test "aarch64_simd_imm_zero_p (op, mode)")))))

@@ -6,6 +6,9 @@
 #elif defined (__powerpc__) || defined (__PPC__) || defined (__ppc__) || defined (__POWERPC__) || defined (__ppc)
   /* On PPC division by zero does not trap.  */
 # define DO_TEST 0
+#elif defined (__riscv)
+  /* On RISC-V division by zero does not trap.  */
+# define DO_TEST 0
 #elif defined (__SPU__)
   /* On SPU division by zero does not trap.  */
 # define DO_TEST 0
@@ -30,6 +33,9 @@
 #elif defined (__TMS320C6X__)
   /* On TI C6X division by zero does not trap.  */
 # define DO_TEST 0
+#elif defined (__VISIUM__)
+  /* On Visium division by zero does not trap.  */
+# define DO_TEST 0
 #elif defined (__mips__) && !defined(__linux__)
   /* MIPS divisions do trap by default, but libgloss targets do not
      intercept the trap and raise a SIGFPE.  The same is probably
@@ -45,7 +51,7 @@
 # define DO_TEST 0
 #elif defined (__epiphany__)
   /* Epiphany does not have hardware division, and the software implementation
-     has truly undefined behaviour for division by 0.  */
+     has truly undefined behavior for division by 0.  */
 # define DO_TEST 0
 #elif defined (__m68k__) && !defined(__linux__)
   /* Attempting to trap division-by-zero in this way isn't likely to work on 
@@ -68,9 +74,9 @@
 #  define DO_TEST 0
 # else
 #  include <signal.h>
-  /* ARM division-by-zero behaviour is to call a helper function, which
+  /* ARM division-by-zero behavior is to call a helper function, which
      can do several different things, depending on requirements.  Emulate
-     the behaviour of other targets here by raising SIGFPE.  */
+     the behavior of other targets here by raising SIGFPE.  */
 int __attribute__((used))
 __aeabi_idiv0 (int return_value)
 {

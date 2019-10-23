@@ -1,7 +1,6 @@
 /* { dg-require-effective-target vect_int } */
 
 #include "tree-vect.h"
-#include <stdlib.h>
 
 #define N 32
 #define COEF 32470
@@ -26,6 +25,8 @@ foo (int a)
 int main (void)
 {
   int i;
+
+  check_vect ();
 
   for (i = 0; i < N; i++)
     {

@@ -59,6 +59,11 @@ extern int vsnprintf(char *, _hpux_size_t, const char *, __gnuc_va_list);
 #endif  /* HPUX11_VSNPRINTF_CHECK */
 
 
+#if defined( HPUX_VSSCANF_CHECK )
+extern int vsscanf(const char *, const char *, __gnuc_va_list);
+#endif  /* HPUX_VSSCANF_CHECK */
+
+
 #if defined( IRIX_STDIO_DUMMY_VA_LIST_CHECK )
 extern int printf( const char *, __gnuc_va_list );
 #endif  /* IRIX_STDIO_DUMMY_VA_LIST_CHECK */
@@ -83,6 +88,13 @@ using std::__flsbuf;
 #endif
 #endif
 #endif  /* SOLARIS_STD___FILBUF_CHECK */
+
+
+#if defined( SOLARIS_STD_GETS_CXX14_CHECK )
+#if __cplusplus < 201402L
+using std::gets;
+#endif
+#endif  /* SOLARIS_STD_GETS_CXX14_CHECK */
 
 
 #if defined( STDIO_STDARG_H_CHECK )

@@ -1,5 +1,5 @@
 /* A type-safe hash table template.
-   Copyright (C) 2012-2015 Free Software Foundation, Inc.
+   Copyright (C) 2012-2017 Free Software Foundation, Inc.
    Contributed by Lawrence Crowl <crowl@google.com>
 
 This file is part of GCC.
@@ -390,8 +390,8 @@ public:
   /* Return the current number of elements in this hash table. */
   size_t elements_with_deleted () const { return m_n_elements; }
 
-  /* This function clears all entries in the given hash table.  */
-  void empty ();
+  /* This function clears all entries in this hash table.  */
+  void empty () { if (elements ()) empty_slow (); }
 
   /* This function clears a specified SLOT in a hash table.  It is
      useful when you've already done the lookup and don't want to do it
@@ -499,8 +499,11 @@ private:
 
   template<typename T> friend void gt_cleare_cache (hash_table<T> *);
 
+  void empty_slow ();
+
   value_type *alloc_entries (size_t n CXX_MEM_STAT_INFO) const;
   value_type *find_empty_slot_for_expand (hashval_t);
+  bool too_empty_p (unsigned int);
   void expand ();
   static bool is_deleted (value_type &v)
   {
@@ -689,6 +692,15 @@ hash_table<Descriptor, Allocator>::find_empty_slot_for_expand (hashval_t hash)
     }
 }
 
+/* Return true if the current table is excessively big for ELTS elements.  */
+
+template<typename Descriptor, template<typename Type> class Allocator>
+inline bool
+hash_table<Descriptor, Allocator>::too_empty_p (unsigned int elts)
+{
+  return elts * 8 < m_size && m_size > 32;
+}
+
 /* The following function changes size of memory allocated for the
    entries and repeatedly inserts the table elements.  The occupancy
    of the table after the call will be about 50%.  Naturally the hash
@@ -710,7 +722,7 @@ hash_table<Descriptor, Allocator>::expand ()
      too full or too empty.  */
   unsigned int nindex;
   size_t nsize;
-  if (elts * 2 > osize || (elts * 8 < osize && osize > 32))
+  if (elts * 2 > osize || too_empty_p (elts))
     {
       nindex = hash_table_higher_prime_index (elts * 2);
       nsize = prime_tab[nindex].prime;
@@ -755,11 +767,14 @@ hash_table<Descriptor, Allocator>::expand ()
     ggc_free (oentries);
 }
 
+/* Implements empty() in cases where it isn't a no-op.  */
+
 template<typename Descriptor, template<typename Type> class Allocator>
 void
-hash_table<Descriptor, Allocator>::empty ()
+hash_table<Descriptor, Allocator>::empty_slow ()
 {
   size_t size = m_size;
+  size_t nsize = size;
   value_type *entries = m_entries;
   int i;
 
@@ -768,9 +783,14 @@ hash_table<Descriptor, Allocator>::empty ()
       Descriptor::remove (entries[i]);
 
   /* Instead of clearing megabyte, downsize the table.  */
-  if (size > 1024*1024 / sizeof (PTR))
+  if (size > 1024*1024 / sizeof (value_type))
+    nsize = 1024 / sizeof (value_type);
+  else if (too_empty_p (m_n_elements))
+    nsize = m_n_elements * 2;
+
+  if (nsize != size)
     {
-      int nindex = hash_table_higher_prime_index (1024 / sizeof (PTR));
+      int nindex = hash_table_higher_prime_index (nsize);
       int nsize = prime_tab[nindex].prime;
 
       if (!m_ggc)
@@ -961,8 +981,7 @@ template <typename Argument,
 void
 hash_table<Descriptor, Allocator>::traverse (Argument argument)
 {
-  size_t size = m_size;
-  if (elements () * 8 < size && size > 32)
+  if (too_empty_p (elements ()))
     expand ();
 
   traverse_noresize <Argument, Callback> (argument);

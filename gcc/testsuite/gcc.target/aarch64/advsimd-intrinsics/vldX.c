@@ -406,7 +406,7 @@ void exec_vldX (void)
   /* We need to use a temporary result buffer (result_bis), because
      the one used for other tests is not large enough. A subset of the
      result data is moved from result_bis to result, and it is this
-     subset which is used to check the actual behaviour. The next
+     subset which is used to check the actual behavior. The next
      macro enables to move another chunk of data from result_bis to
      result.  */
 #define TEST_VLDX(Q, T1, T2, W, N, X)					\
@@ -528,8 +528,8 @@ void exec_vldX (void)
     CHECK(test_name, uint, 16, 4, PRIx16, EXPECTED, comment);		\
     CHECK(test_name, uint, 32, 2, PRIx32, EXPECTED, comment);		\
     CHECK(test_name, uint, 64, 1, PRIx64, EXPECTED, comment);		\
-    CHECK(test_name, poly, 8, 8, PRIx8, EXPECTED, comment);		\
-    CHECK(test_name, poly, 16, 4, PRIx16, EXPECTED, comment);		\
+    CHECK_POLY(test_name, poly, 8, 8, PRIx8, EXPECTED, comment);	\
+    CHECK_POLY(test_name, poly, 16, 4, PRIx16, EXPECTED, comment);	\
     CHECK_FP(test_name, float, 32, 2, PRIx32, EXPECTED, comment);	\
 									\
     CHECK(test_name, int, 8, 16, PRIx8, EXPECTED, comment);		\
@@ -538,8 +538,8 @@ void exec_vldX (void)
     CHECK(test_name, uint, 8, 16, PRIx8, EXPECTED, comment);		\
     CHECK(test_name, uint, 16, 8, PRIx16, EXPECTED, comment);		\
     CHECK(test_name, uint, 32, 4, PRIx32, EXPECTED, comment);		\
-    CHECK(test_name, poly, 8, 16, PRIx8, EXPECTED, comment);		\
-    CHECK(test_name, poly, 16, 8, PRIx16, EXPECTED, comment);		\
+    CHECK_POLY(test_name, poly, 8, 16, PRIx8, EXPECTED, comment);	\
+    CHECK_POLY(test_name, poly, 16, 8, PRIx16, EXPECTED, comment);	\
     CHECK_FP(test_name, float, 32, 4, PRIx32, EXPECTED, comment)
 
 #if defined (__ARM_FP16_FORMAT_IEEE) || defined (__ARM_FP16_FORMAT_ALTERNATIVE)

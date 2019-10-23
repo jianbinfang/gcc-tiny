@@ -1,5 +1,5 @@
 /* Code for RTL register eliminations.
-   Copyright (C) 2010-2015 Free Software Foundation, Inc.
+   Copyright (C) 2010-2017 Free Software Foundation, Inc.
    Contributed by Vladimir Makarov <vmakarov@redhat.com>.
 
 This file is part of GCC.
@@ -59,6 +59,7 @@ along with GCC; see the file COPYING3.	If not see
 #include "rtl.h"
 #include "tree.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "optabs.h"
 #include "regs.h"
@@ -108,15 +109,7 @@ static const struct elim_table_1
   const int to;
 } reg_eliminate_1[] =
 
-/* If a set of eliminable hard registers was specified, define the
-   table from it.  Otherwise, default to the normal case of the frame
-   pointer being replaced by the stack pointer.	 */
-
-#ifdef ELIMINABLE_REGS
   ELIMINABLE_REGS;
-#else
-  {{ FRAME_POINTER_REGNUM, STACK_POINTER_REGNUM}};
-#endif
 
 #define NUM_ELIMINABLE_REGS ARRAY_SIZE (reg_eliminate_1)
 
@@ -295,10 +288,18 @@ move_plus_up (rtx x)
   subreg_reg_mode = GET_MODE (subreg_reg);
   if (GET_CODE (x) == SUBREG && GET_CODE (subreg_reg) == PLUS
       && GET_MODE_SIZE (x_mode) <= GET_MODE_SIZE (subreg_reg_mode)
-      && CONSTANT_P (XEXP (subreg_reg, 1)))
-    return gen_rtx_PLUS (x_mode, lowpart_subreg (x_mode, subreg_reg,
-						 subreg_reg_mode),
-			 XEXP (subreg_reg, 1));
+      && CONSTANT_P (XEXP (subreg_reg, 1))
+      && GET_MODE_CLASS (x_mode) == MODE_INT
+      && GET_MODE_CLASS (subreg_reg_mode) == MODE_INT)
+    {
+      rtx cst = simplify_subreg (x_mode, XEXP (subreg_reg, 1), subreg_reg_mode,
+				 subreg_lowpart_offset (x_mode,
+							subreg_reg_mode));
+      if (cst && CONSTANT_P (cst))
+	return gen_rtx_PLUS (x_mode, lowpart_subreg (x_mode,
+						     XEXP (subreg_reg, 0),
+						     subreg_reg_mode), cst);
+    }
   return x;
 }
 
@@ -476,7 +477,7 @@ lra_eliminate_regs_1 (rtx_insn *insn, rtx x, machine_mode mem_mode,
 	    return gen_rtx_MULT (Pmode, to, XEXP (x, 1));
 	}
 
-      /* ... fall through ...  */
+      /* fall through */
 
     case CALL:
     case COMPARE:
@@ -528,7 +529,7 @@ lra_eliminate_regs_1 (rtx_insn *insn, rtx x, machine_mode mem_mode,
 	    }
 	}
 
-      /* ... fall through ...  */
+      /* fall through */
 
     case INSN_LIST:
     case INT_LIST:
@@ -981,7 +982,7 @@ eliminate_regs_in_insn (rtx_insn *insn, bool replace_p, bool first_p,
 		      }
 		    lra_update_insn_recog_data (insn);
 		    /* Add offset note for future updates.  */
-		    add_reg_note (insn, REG_EQUAL, src);
+		    add_reg_note (insn, REG_EQUAL, copy_rtx (src));
 		    return;
 		  }
 	      }
@@ -1257,11 +1258,7 @@ update_reg_eliminate (bitmap insns_with_changed_offsets)
 	    }
 	}
 
-#ifdef ELIMINABLE_REGS
       INITIAL_ELIMINATION_OFFSET (ep->from, ep->to, ep->offset);
-#else
-      INITIAL_FRAME_POINTER_OFFSET (ep->offset);
-#endif
     }
   setup_elimination_map ();
   result = false;
@@ -1300,10 +1297,8 @@ static void
 init_elim_table (void)
 {
   struct lra_elim_table *ep;
-#ifdef ELIMINABLE_REGS
   bool value_p;
   const struct elim_table_1 *ep1;
-#endif
 
   if (!reg_eliminate)
     reg_eliminate = XCNEWVEC (struct lra_elim_table, NUM_ELIMINABLE_REGS);
@@ -1312,7 +1307,7 @@ init_elim_table (void)
   /* Initiate member values which will be never changed.  */
   self_elim_table.can_eliminate = self_elim_table.prev_can_eliminate = true;
   self_elim_table.previous_offset = 0;
-#ifdef ELIMINABLE_REGS
+
   for (ep = reg_eliminate, ep1 = reg_eliminate_1;
        ep < &reg_eliminate[NUM_ELIMINABLE_REGS]; ep++, ep1++)
     {
@@ -1326,12 +1321,6 @@ init_elim_table (void)
 			   || ! stack_realign_fp)));
       setup_can_eliminate (ep, value_p);
     }
-#else
-  reg_eliminate[0].offset = reg_eliminate[0].previous_offset = 0;
-  reg_eliminate[0].from = reg_eliminate_1[0].from;
-  reg_eliminate[0].to = reg_eliminate_1[0].to;
-  setup_can_eliminate (&reg_eliminate[0], ! frame_pointer_needed);
-#endif
 
   /* Build the FROM and TO REG rtx's.  Note that code in gen_rtx_REG
      will cause, e.g., gen_rtx_REG (Pmode, STACK_POINTER_REGNUM) to

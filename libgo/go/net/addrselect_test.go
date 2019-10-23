@@ -87,6 +87,36 @@ func TestSortByRFC6724(t *testing.T) {
 			},
 			reverse: true,
 		},
+
+		// Issue 13283.  Having a 10/8 source address does not
+		// mean we should prefer 23/8 destination addresses.
+		{
+			in: []IPAddr{
+				{IP: ParseIP("54.83.193.112")},
+				{IP: ParseIP("184.72.238.214")},
+				{IP: ParseIP("23.23.172.185")},
+				{IP: ParseIP("75.101.148.21")},
+				{IP: ParseIP("23.23.134.56")},
+				{IP: ParseIP("23.21.50.150")},
+			},
+			srcs: []IP{
+				ParseIP("10.2.3.4"),
+				ParseIP("10.2.3.4"),
+				ParseIP("10.2.3.4"),
+				ParseIP("10.2.3.4"),
+				ParseIP("10.2.3.4"),
+				ParseIP("10.2.3.4"),
+			},
+			want: []IPAddr{
+				{IP: ParseIP("54.83.193.112")},
+				{IP: ParseIP("184.72.238.214")},
+				{IP: ParseIP("23.23.172.185")},
+				{IP: ParseIP("75.101.148.21")},
+				{IP: ParseIP("23.23.134.56")},
+				{IP: ParseIP("23.21.50.150")},
+			},
+			reverse: false,
+		},
 	}
 	for i, tt := range tests {
 		inCopy := make([]IPAddr, len(tt.in))

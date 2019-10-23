@@ -18,7 +18,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 	case constArg && isConstType(T):
 		// constant conversion
 		switch t := T.Underlying().(*Basic); {
-		case representableConst(x.val, check.conf, t.kind, &x.val):
+		case representableConst(x.val, check.conf, t, &x.val):
 			ok = true
 		case isInteger(x.typ) && isString(t):
 			codepoint := int64(-1)
@@ -55,7 +55,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 		//   not []byte as type for the constant "foo").
 		// - Keep untyped nil for untyped nil arguments.
 		if IsInterface(T) || constArg && !isConstType(T) {
-			final = defaultType(x.typ)
+			final = Default(x.typ)
 		}
 		check.updateExprType(x.expr, final, true)
 	}
@@ -65,22 +65,23 @@ func (check *Checker) conversion(x *operand, T Type) {
 
 func (x *operand) convertibleTo(conf *Config, T Type) bool {
 	// "x is assignable to T"
-	if x.assignableTo(conf, T) {
+	if x.assignableTo(conf, T, nil) {
 		return true
 	}
 
-	// "x's type and T have identical underlying types"
+	// "x's type and T have identical underlying types if tags are ignored"
 	V := x.typ
 	Vu := V.Underlying()
 	Tu := T.Underlying()
-	if Identical(Vu, Tu) {
+	if IdenticalIgnoreTags(Vu, Tu) {
 		return true
 	}
 
-	// "x's type and T are unnamed pointer types and their pointer base types have identical underlying types"
+	// "x's type and T are unnamed pointer types and their pointer base types
+	// have identical underlying types if tags are ignored"
 	if V, ok := V.(*Pointer); ok {
 		if T, ok := T.(*Pointer); ok {
-			if Identical(V.base.Underlying(), T.base.Underlying()) {
+			if IdenticalIgnoreTags(V.base.Underlying(), T.base.Underlying()) {
 				return true
 			}
 		}

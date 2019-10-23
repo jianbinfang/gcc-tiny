@@ -1,5 +1,5 @@
 ;; Unspec defintions.
-;; Copyright (C) 2012-2015 Free Software Foundation, Inc.
+;; Copyright (C) 2012-2017 Free Software Foundation, Inc.
 ;; Contributed by ARM Ltd.
 
 ;; This file is part of GCC.
@@ -84,6 +84,8 @@
   UNSPEC_VRINTA         ; Represent a float to integral float rounding
                         ; towards nearest, ties away from zero.
   UNSPEC_PROBE_STACK    ; Probe stack memory reference
+  UNSPEC_NONSECURE_MEM	; Represent non-secure memory in ARMv8-M with
+			; security extension
 ])
 
 (define_c_enum "unspec" [
@@ -139,6 +141,7 @@
   VUNSPEC_ATOMIC_XCHG	; Represent an atomic exchange.
   VUNSPEC_ATOMIC_OP	; Represent an atomic operation.
   VUNSPEC_LL		; Represent a load-register-exclusive.
+  VUNSPEC_LDRD_ATOMIC	; Represent an LDRD used as an atomic DImode load.
   VUNSPEC_SC		; Represent a store-register-exclusive.
   VUNSPEC_LAX		; Represent a load-register-acquire-exclusive.
   VUNSPEC_SLX		; Represent a store-register-release-exclusive.
@@ -147,6 +150,24 @@
   VUNSPEC_GET_FPSCR	; Represent fetch of FPSCR content.
   VUNSPEC_SET_FPSCR	; Represent assign of FPSCR content.
   VUNSPEC_PROBE_STACK_RANGE ; Represent stack range probing.
+  VUNSPEC_CDP		; Represent the coprocessor cdp instruction.
+  VUNSPEC_CDP2		; Represent the coprocessor cdp2 instruction.
+  VUNSPEC_LDC		; Represent the coprocessor ldc instruction.
+  VUNSPEC_LDC2		; Represent the coprocessor ldc2 instruction.
+  VUNSPEC_LDCL		; Represent the coprocessor ldcl instruction.
+  VUNSPEC_LDC2L		; Represent the coprocessor ldc2l instruction.
+  VUNSPEC_STC		; Represent the coprocessor stc instruction.
+  VUNSPEC_STC2		; Represent the coprocessor stc2 instruction.
+  VUNSPEC_STCL		; Represent the coprocessor stcl instruction.
+  VUNSPEC_STC2L		; Represent the coprocessor stc2l instruction.
+  VUNSPEC_MCR		; Represent the coprocessor mcr instruction.
+  VUNSPEC_MCR2		; Represent the coprocessor mcr2 instruction.
+  VUNSPEC_MRC		; Represent the coprocessor mrc instruction.
+  VUNSPEC_MRC2		; Represent the coprocessor mrc2 instruction.
+  VUNSPEC_MCRR		; Represent the coprocessor mcrr instruction.
+  VUNSPEC_MCRR2		; Represent the coprocessor mcrr2 instruction.
+  VUNSPEC_MRRC		; Represent the coprocessor mrrc instruction.
+  VUNSPEC_MRRC2		; Represent the coprocessor mrrc2 instruction.
 ])
 
 ;; Enumerators for NEON unspecs.
@@ -190,6 +211,8 @@
   UNSPEC_VBSL
   UNSPEC_VCAGE
   UNSPEC_VCAGT
+  UNSPEC_VCALE
+  UNSPEC_VCALT
   UNSPEC_VCEQ
   UNSPEC_VCGE
   UNSPEC_VCGEU
@@ -202,6 +225,20 @@
   UNSPEC_VCVT_U
   UNSPEC_VCVT_S_N
   UNSPEC_VCVT_U_N
+  UNSPEC_VCVT_HF_S_N
+  UNSPEC_VCVT_HF_U_N
+  UNSPEC_VCVT_SI_S_N
+  UNSPEC_VCVT_SI_U_N
+  UNSPEC_VCVTH_S
+  UNSPEC_VCVTH_U
+  UNSPEC_VCVTA_S
+  UNSPEC_VCVTA_U
+  UNSPEC_VCVTM_S
+  UNSPEC_VCVTM_U
+  UNSPEC_VCVTN_S
+  UNSPEC_VCVTN_U
+  UNSPEC_VCVTP_S
+  UNSPEC_VCVTP_U
   UNSPEC_VEXT
   UNSPEC_VHADD_S
   UNSPEC_VHADD_U
@@ -243,6 +280,8 @@
   UNSPEC_VMLSL_S_LANE
   UNSPEC_VMLSL_U_LANE
   UNSPEC_VMLSL_LANE
+  UNSPEC_VFMA_LANE
+  UNSPEC_VFMS_LANE
   UNSPEC_VMOVL_S
   UNSPEC_VMOVL_U
   UNSPEC_VMOVN
@@ -364,5 +403,11 @@
   UNSPEC_NVRINTN
   UNSPEC_VQRDMLAH
   UNSPEC_VQRDMLSH
+  UNSPEC_VRND
+  UNSPEC_VRNDA
+  UNSPEC_VRNDI
+  UNSPEC_VRNDM
+  UNSPEC_VRNDN
+  UNSPEC_VRNDP
+  UNSPEC_VRNDX
 ])
-

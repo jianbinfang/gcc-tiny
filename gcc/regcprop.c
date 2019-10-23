@@ -1,5 +1,5 @@
 /* Copy propagation on hard registers for the GNU compiler.
-   Copyright (C) 2000-2015 Free Software Foundation, Inc.
+   Copyright (C) 2000-2017 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -23,6 +23,7 @@
 #include "backend.h"
 #include "rtl.h"
 #include "df.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "regs.h"
@@ -32,6 +33,7 @@
 #include "addresses.h"
 #include "tree-pass.h"
 #include "rtl-iter.h"
+#include "cfgrtl.h"
 
 /* The following code does forward propagation of hard register copies.
    The object is to eliminate as many dependencies as possible, so that
@@ -394,6 +396,13 @@ maybe_mode_change (machine_mode orig_mode, machine_mode copy_mode,
       && GET_MODE_SIZE (copy_mode) < GET_MODE_SIZE (new_mode))
     return NULL_RTX;
 
+  /* Avoid creating multiple copies of the stack pointer.  Some ports
+     assume there is one and only one stack pointer.
+
+     It's unclear if we need to do the same for other special registers.  */
+  if (regno == STACK_POINTER_REGNUM)
+    return NULL_RTX;
+
   if (orig_mode == new_mode)
     return gen_raw_REG (new_mode, regno);
   else if (mode_change_ok (orig_mode, new_mode, regno))
@@ -739,9 +748,9 @@ static bool
 copyprop_hardreg_forward_1 (basic_block bb, struct value_data *vd)
 {
   bool anything_changed = false;
-  rtx_insn *insn;
+  rtx_insn *insn, *next;
 
-  for (insn = BB_HEAD (bb); ; insn = NEXT_INSN (insn))
+  for (insn = BB_HEAD (bb); ; insn = next)
     {
       int n_ops, i, predicated;
       bool is_asm, any_replacements;
@@ -751,6 +760,7 @@ copyprop_hardreg_forward_1 (basic_block bb, struct value_data *vd)
       bool changed = false;
       struct kill_set_value_data ksvd;
 
+      next = NEXT_INSN (insn);
       if (!NONDEBUG_INSN_P (insn))
 	{
 	  if (DEBUG_INSN_P (insn))
@@ -769,6 +779,25 @@ copyprop_hardreg_forward_1 (basic_block bb, struct value_data *vd)
 	}
 
       set = single_set (insn);
+
+      /* Detect noop sets and remove them before processing side effects.  */
+      if (set && REG_P (SET_DEST (set)) && REG_P (SET_SRC (set)))
+	{
+	  unsigned int regno = REGNO (SET_SRC (set));
+	  rtx r1 = find_oldest_value_reg (REGNO_REG_CLASS (regno),
+					  SET_DEST (set), vd);
+	  rtx r2 = find_oldest_value_reg (REGNO_REG_CLASS (regno),
+					  SET_SRC (set), vd);
+	  if (rtx_equal_p (r1 ? r1 : SET_DEST (set), r2 ? r2 : SET_SRC (set)))
+	    {
+	      bool last = insn == BB_END (bb);
+	      delete_insn (insn);
+	      if (last)
+		break;
+	      continue;
+	    }
+	}
+
       extract_constrain_insn (insn);
       preprocess_constraints (insn);
       const operand_alternative *op_alt = which_op_alt ();
@@ -858,7 +887,9 @@ copyprop_hardreg_forward_1 (basic_block bb, struct value_data *vd)
 	     register in the same class.  */
 	  if (REG_P (SET_DEST (set)))
 	    {
-	      new_rtx = find_oldest_value_reg (REGNO_REG_CLASS (regno), src, vd);
+	      new_rtx = find_oldest_value_reg (REGNO_REG_CLASS (regno),
+					       src, vd);
+
 	      if (new_rtx && validate_change (insn, &SET_SRC (set), new_rtx, 0))
 		{
 		  if (dump_file)
@@ -1042,6 +1073,23 @@ copyprop_hardreg_forward_1 (basic_block bb, struct value_data *vd)
       bool noop_p = (copy_p
 		     && rtx_equal_p (SET_DEST (set), SET_SRC (set)));
 
+      /* If a noop move is using narrower mode than we have recorded,
+	 we need to either remove the noop move, or kill_set_value.  */
+      if (noop_p
+	  && (GET_MODE_BITSIZE (GET_MODE (SET_DEST (set)))
+	      < GET_MODE_BITSIZE (vd->e[REGNO (SET_DEST (set))].mode)))
+	{
+	  if (noop_move_p (insn))
+	    {
+	      bool last = insn == BB_END (bb);
+	      delete_insn (insn);
+	      if (last)
+		break;
+	    }
+	  else
+	    noop_p = false;
+	}
+
       if (!noop_p)
 	{
 	  /* Notice stores.  */
@@ -1219,12 +1267,11 @@ pass_cprop_hardreg::execute (function *fun)
 {
   struct value_data *all_vd;
   basic_block bb;
-  sbitmap visited;
   bool analyze_called = false;
 
   all_vd = XNEWVEC (struct value_data, last_basic_block_for_fn (fun));
 
-  visited = sbitmap_alloc (last_basic_block_for_fn (fun));
+  auto_sbitmap visited (last_basic_block_for_fn (fun));
   bitmap_clear (visited);
 
   FOR_EACH_BB_FN (bb, fun)
@@ -1289,7 +1336,6 @@ pass_cprop_hardreg::execute (function *fun)
       queued_debug_insn_change_pool.release ();
     }
 
-  sbitmap_free (visited);
   free (all_vd);
   return 0;
 }

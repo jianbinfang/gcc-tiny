@@ -1,4 +1,4 @@
-// Copyright 2012 The Go Authors.  All rights reserved.
+// Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -21,7 +21,7 @@ import (
 )
 
 // pkgDeps defines the expected dependencies between packages in
-// the Go source tree.  It is a statement of policy.
+// the Go source tree. It is a statement of policy.
 // Changes should not be made to this map without prior discussion.
 //
 // The map contains two kinds of entries:
@@ -34,17 +34,21 @@ import (
 //
 var pkgDeps = map[string][]string{
 	// L0 is the lowest level, core, nearly unavoidable packages.
-	"errors":      {},
-	"io":          {"errors", "sync"},
-	"runtime":     {"unsafe"},
-	"sync":        {"runtime", "sync/atomic", "unsafe"},
-	"sync/atomic": {"unsafe"},
-	"unsafe":      {},
+	"errors":                  {},
+	"io":                      {"errors", "sync"},
+	"runtime":                 {"unsafe", "runtime/internal/atomic", "runtime/internal/sys"},
+	"runtime/internal/sys":    {},
+	"runtime/internal/atomic": {"unsafe", "runtime/internal/sys"},
+	"internal/race":           {"runtime", "unsafe"},
+	"sync":                    {"internal/race", "runtime", "sync/atomic", "unsafe"},
+	"sync/atomic":             {"unsafe"},
+	"unsafe":                  {},
 
 	"L0": {
 		"errors",
 		"io",
 		"runtime",
+		"runtime/internal/atomic",
 		"sync",
 		"sync/atomic",
 		"unsafe",
@@ -55,7 +59,6 @@ var pkgDeps = map[string][]string{
 	"math":          {"unsafe"},
 	"math/cmplx":    {"math"},
 	"math/rand":     {"L0", "math"},
-	"sort":          {},
 	"strconv":       {"L0", "unicode/utf8", "math"},
 	"unicode/utf16": {},
 	"unicode/utf8":  {},
@@ -90,8 +93,8 @@ var pkgDeps = map[string][]string{
 	// L3 adds reflection and some basic utility packages
 	// and interface definitions, but nothing that makes
 	// system calls.
-	"crypto":              {"L2", "hash"},          // interfaces
-	"crypto/cipher":       {"L2", "crypto/subtle"}, // interfaces
+	"crypto":              {"L2", "hash"}, // interfaces
+	"crypto/cipher":       {"L2", "crypto/subtle"},
 	"crypto/subtle":       {},
 	"encoding/base32":     {"L2"},
 	"encoding/base64":     {"L2"},
@@ -105,11 +108,13 @@ var pkgDeps = map[string][]string{
 	"image/color":         {"L2"},                // interfaces
 	"image/color/palette": {"L2", "image/color"},
 	"reflect":             {"L2"},
+	"sort":                {"reflect"},
 
 	"L3": {
 		"L2",
 		"crypto",
 		"crypto/cipher",
+		"crypto/internal/cipherhw",
 		"crypto/subtle",
 		"encoding/base32",
 		"encoding/base64",
@@ -128,15 +133,27 @@ var pkgDeps = map[string][]string{
 	// End of linear dependency definitions.
 
 	// Operating system access.
-	"syscall":                           {"L0", "unicode/utf16"},
+	"syscall":                           {"L0", "internal/race", "internal/syscall/windows/sysdll", "unicode/utf16"},
 	"internal/syscall/unix":             {"L0", "syscall"},
-	"internal/syscall/windows":          {"L0", "syscall"},
-	"internal/syscall/windows/registry": {"L0", "syscall", "unicode/utf16"},
-	"time":          {"L0", "syscall", "internal/syscall/windows/registry"},
+	"internal/syscall/windows":          {"L0", "syscall", "internal/syscall/windows/sysdll"},
+	"internal/syscall/windows/registry": {"L0", "syscall", "internal/syscall/windows/sysdll", "unicode/utf16"},
+	"time": {
+		// "L0" without the "io" package:
+		"errors",
+		"runtime",
+		"runtime/internal/atomic",
+		"sync",
+		"sync/atomic",
+		"unsafe",
+		// Other time dependencies:
+		"internal/syscall/windows/registry",
+		"syscall",
+	},
+
 	"os":            {"L1", "os", "syscall", "time", "internal/syscall/windows"},
 	"path/filepath": {"L2", "os", "syscall"},
 	"io/ioutil":     {"L2", "os", "path/filepath", "time"},
-	"os/exec":       {"L2", "os", "path/filepath", "syscall"},
+	"os/exec":       {"L2", "os", "context", "path/filepath", "syscall"},
 	"os/signal":     {"L2", "os", "syscall"},
 
 	// OS enables basic operating system functionality,
@@ -154,17 +171,18 @@ var pkgDeps = map[string][]string{
 	"log": {"L1", "os", "fmt", "time"},
 
 	// Packages used by testing must be low-level (L2+fmt).
-	"regexp":         {"L2", "regexp/syntax"},
-	"regexp/syntax":  {"L2"},
-	"runtime/debug":  {"L2", "fmt", "io/ioutil", "os", "time"},
-	"runtime/pprof":  {"L2", "fmt", "text/tabwriter"},
-	"runtime/trace":  {"L0"},
-	"text/tabwriter": {"L2"},
+	"regexp":                            {"L2", "regexp/syntax"},
+	"regexp/syntax":                     {"L2"},
+	"runtime/debug":                     {"L2", "fmt", "io/ioutil", "os", "time"},
+	"runtime/pprof/internal/protopprof": {"L2", "fmt", "internal/pprof/profile", "os", "time"},
+	"runtime/pprof":                     {"L2", "fmt", "internal/pprof/profile", "os", "runtime/pprof/internal/protopprof", "text/tabwriter", "time"},
+	"runtime/trace":                     {"L0"},
+	"text/tabwriter":                    {"L2"},
 
-	"testing":          {"L2", "flag", "fmt", "os", "runtime/pprof", "runtime/trace", "time"},
+	"testing":          {"L2", "flag", "fmt", "internal/race", "os", "runtime/debug", "runtime/pprof", "runtime/trace", "time"},
 	"testing/iotest":   {"L2", "log"},
 	"testing/quick":    {"L2", "flag", "fmt", "reflect"},
-	"internal/testenv": {"L2", "os", "testing"},
+	"internal/testenv": {"L2", "OS", "flag", "testing", "syscall"},
 
 	// L4 is defined as L3+fmt+log+time, because in general once
 	// you're using L3 packages, use of fmt, log, or time is not a big deal.
@@ -203,49 +221,53 @@ var pkgDeps = map[string][]string{
 	"go/types":                  {"L4", "GOPARSER", "container/heap", "go/constant"},
 
 	// One of a kind.
-	"archive/tar":              {"L4", "OS", "syscall"},
-	"archive/zip":              {"L4", "OS", "compress/flate"},
-	"container/heap":           {"sort"},
-	"compress/bzip2":           {"L4"},
-	"compress/flate":           {"L4"},
-	"compress/gzip":            {"L4", "compress/flate"},
-	"compress/lzw":             {"L4"},
-	"compress/zlib":            {"L4", "compress/flate"},
-	"database/sql":             {"L4", "container/list", "database/sql/driver"},
-	"database/sql/driver":      {"L4", "time"},
-	"debug/dwarf":              {"L4"},
-	"debug/elf":                {"L4", "OS", "debug/dwarf"},
-	"debug/gosym":              {"L4"},
-	"debug/macho":              {"L4", "OS", "debug/dwarf"},
-	"debug/pe":                 {"L4", "OS", "debug/dwarf"},
-	"debug/plan9obj":           {"L4", "OS"},
-	"encoding":                 {"L4"},
-	"encoding/ascii85":         {"L4"},
-	"encoding/asn1":            {"L4", "math/big"},
-	"encoding/csv":             {"L4"},
-	"encoding/gob":             {"L4", "OS", "encoding"},
-	"encoding/hex":             {"L4"},
-	"encoding/json":            {"L4", "encoding"},
-	"encoding/pem":             {"L4"},
-	"encoding/xml":             {"L4", "encoding"},
-	"flag":                     {"L4", "OS"},
-	"go/build":                 {"L4", "OS", "GOPARSER"},
-	"html":                     {"L4"},
-	"image/draw":               {"L4", "image/internal/imageutil"},
-	"image/gif":                {"L4", "compress/lzw", "image/color/palette", "image/draw"},
-	"image/internal/imageutil": {"L4"},
-	"image/jpeg":               {"L4", "image/internal/imageutil"},
-	"image/png":                {"L4", "compress/zlib"},
-	"index/suffixarray":        {"L4", "regexp"},
-	"internal/singleflight":    {"sync"},
-	"internal/trace":           {"L4", "OS"},
-	"math/big":                 {"L4"},
-	"mime":                     {"L4", "OS", "syscall", "internal/syscall/windows/registry"},
-	"mime/quotedprintable":     {"L4"},
-	"net/internal/socktest":    {"L4", "OS", "syscall"},
-	"net/url":                  {"L4"},
-	"text/scanner":             {"L4", "OS"},
-	"text/template/parse":      {"L4"},
+	"archive/tar":               {"L4", "OS", "syscall"},
+	"archive/zip":               {"L4", "OS", "compress/flate"},
+	"container/heap":            {"sort"},
+	"compress/bzip2":            {"L4"},
+	"compress/flate":            {"L4"},
+	"compress/gzip":             {"L4", "compress/flate"},
+	"compress/lzw":              {"L4"},
+	"compress/zlib":             {"L4", "compress/flate"},
+	"context":                   {"errors", "fmt", "reflect", "sync", "time"},
+	"database/sql":              {"L4", "container/list", "context", "database/sql/driver", "database/sql/internal"},
+	"database/sql/driver":       {"L4", "context", "time", "database/sql/internal"},
+	"debug/dwarf":               {"L4"},
+	"debug/elf":                 {"L4", "OS", "debug/dwarf", "compress/zlib"},
+	"debug/gosym":               {"L4"},
+	"debug/macho":               {"L4", "OS", "debug/dwarf"},
+	"debug/pe":                  {"L4", "OS", "debug/dwarf"},
+	"debug/plan9obj":            {"L4", "OS"},
+	"encoding":                  {"L4"},
+	"encoding/ascii85":          {"L4"},
+	"encoding/asn1":             {"L4", "math/big"},
+	"encoding/csv":              {"L4"},
+	"encoding/gob":              {"L4", "OS", "encoding"},
+	"encoding/hex":              {"L4"},
+	"encoding/json":             {"L4", "encoding"},
+	"encoding/pem":              {"L4"},
+	"encoding/xml":              {"L4", "encoding"},
+	"flag":                      {"L4", "OS"},
+	"go/build":                  {"L4", "OS", "GOPARSER"},
+	"html":                      {"L4"},
+	"image/draw":                {"L4", "image/internal/imageutil"},
+	"image/gif":                 {"L4", "compress/lzw", "image/color/palette", "image/draw"},
+	"image/internal/imageutil":  {"L4"},
+	"image/jpeg":                {"L4", "image/internal/imageutil"},
+	"image/png":                 {"L4", "compress/zlib"},
+	"index/suffixarray":         {"L4", "regexp"},
+	"internal/singleflight":     {"sync"},
+	"internal/trace":            {"L4", "OS"},
+	"internal/pprof/profile":    {"L4", "OS", "compress/gzip", "regexp"},
+	"math/big":                  {"L4"},
+	"mime":                      {"L4", "OS", "syscall", "internal/syscall/windows/registry"},
+	"mime/quotedprintable":      {"L4"},
+	"net/internal/socktest":     {"L4", "OS", "syscall"},
+	"net/url":                   {"L4"},
+	"plugin":                    {"L0", "OS", "CGO"},
+	"testing/internal/testdeps": {"L4", "runtime/pprof", "regexp"},
+	"text/scanner":              {"L4", "OS"},
+	"text/template/parse":       {"L4"},
 
 	"html/template": {
 		"L4", "OS", "encoding/json", "html", "text/template",
@@ -256,6 +278,8 @@ var pkgDeps = map[string][]string{
 	},
 
 	// Cgo.
+	// If you add a dependency on CGO, you must add the package to
+	// cgoPackages in cmd/dist/test.go.
 	"runtime/cgo": {"L0", "C"},
 	"CGO":         {"C", "runtime/cgo"},
 
@@ -263,16 +287,23 @@ var pkgDeps = map[string][]string{
 	// that shows up in programs that use cgo.
 	"C": {},
 
-	// Race detector uses cgo.
+	// Race detector/MSan uses cgo.
 	"runtime/race": {"C"},
+	"runtime/msan": {"C"},
 
 	// Plan 9 alone needs io/ioutil and os.
 	"os/user": {"L4", "CGO", "io/ioutil", "os", "syscall"},
 
 	// Basic networking.
 	// Because net must be used by any package that wants to
-	// do networking portably, it must have a small dependency set: just L1+basic os.
-	"net": {"L1", "CGO", "os", "syscall", "time", "internal/syscall/windows", "internal/singleflight"},
+	// do networking portably, it must have a small dependency set: just L0+basic os.
+	"net": {
+		"L0", "CGO",
+		"context", "math/rand", "os", "sort", "syscall", "time",
+		"internal/nettrace",
+		"internal/syscall/windows", "internal/singleflight", "internal/race",
+		"golang_org/x/net/lif", "golang_org/x/net/route",
+	},
 
 	// NET enables use of basic network-related packages.
 	"NET": {
@@ -306,6 +337,9 @@ var pkgDeps = map[string][]string{
 		"crypto/sha1",
 		"crypto/sha256",
 		"crypto/sha512",
+		"golang_org/x/crypto/chacha20poly1305",
+		"golang_org/x/crypto/curve25519",
+		"golang_org/x/crypto/poly1305",
 	},
 
 	// Random byte, number generation.
@@ -333,7 +367,7 @@ var pkgDeps = map[string][]string{
 
 	// SSL/TLS.
 	"crypto/tls": {
-		"L4", "CRYPTO-MATH", "CGO", "OS",
+		"L4", "CRYPTO-MATH", "OS",
 		"container/list", "crypto/x509", "encoding/pem", "net", "syscall",
 	},
 	"crypto/x509": {
@@ -349,18 +383,32 @@ var pkgDeps = map[string][]string{
 	// HTTP, kingpin of dependencies.
 	"net/http": {
 		"L4", "NET", "OS",
-		"compress/gzip", "crypto/tls", "mime/multipart", "runtime/debug",
+		"compress/gzip",
+		"container/list",
+		"context",
+		"crypto/rand",
+		"crypto/tls",
+		"golang_org/x/net/http2/hpack",
+		"golang_org/x/net/idna",
+		"golang_org/x/net/lex/httplex",
+		"golang_org/x/text/unicode/norm",
+		"golang_org/x/text/width",
+		"internal/nettrace",
+		"mime/multipart",
+		"net/http/httptrace",
 		"net/http/internal",
+		"runtime/debug",
 	},
-	"net/http/internal": {"L4"},
+	"net/http/internal":  {"L4"},
+	"net/http/httptrace": {"context", "crypto/tls", "internal/nettrace", "net", "reflect", "time"},
 
 	// HTTP-using packages.
 	"expvar":             {"L4", "OS", "encoding/json", "net/http"},
 	"net/http/cgi":       {"L4", "NET", "OS", "crypto/tls", "net/http", "regexp"},
 	"net/http/cookiejar": {"L4", "NET", "net/http"},
 	"net/http/fcgi":      {"L4", "NET", "OS", "net/http", "net/http/cgi"},
-	"net/http/httptest":  {"L4", "NET", "OS", "crypto/tls", "flag", "net/http"},
-	"net/http/httputil":  {"L4", "NET", "OS", "net/http", "net/http/internal"},
+	"net/http/httptest":  {"L4", "NET", "OS", "crypto/tls", "flag", "net/http", "net/http/internal"},
+	"net/http/httputil":  {"L4", "NET", "OS", "context", "net/http", "net/http/internal"},
 	"net/http/pprof":     {"L4", "OS", "html/template", "net/http", "runtime/pprof", "runtime/trace"},
 	"net/rpc":            {"L4", "NET", "encoding/gob", "html/template", "net/http"},
 	"net/rpc/jsonrpc":    {"L4", "NET", "encoding/json", "net/rpc"},
@@ -394,21 +442,6 @@ func allowed(pkg string) map[string]bool {
 	return m
 }
 
-var bools = []bool{false, true}
-var geese = []string{"android", "darwin", "dragonfly", "freebsd", "linux", "nacl", "netbsd", "openbsd", "plan9", "solaris", "windows"}
-var goarches = []string{"386", "amd64", "arm", "arm64"}
-
-type osPkg struct {
-	goos, pkg string
-}
-
-// allowedErrors are the operating systems and packages known to contain errors
-// (currently just "no Go source files")
-var allowedErrors = map[osPkg]bool{
-	osPkg{"windows", "log/syslog"}: true,
-	osPkg{"plan9", "log/syslog"}:   true,
-}
-
 // listStdPkgs returns the same list of packages as "go list std".
 func listStdPkgs(goroot string) ([]string, error) {
 	// Based on cmd/go's matchPackages function.
@@ -426,7 +459,7 @@ func listStdPkgs(goroot string) ([]string, error) {
 		}
 
 		name := filepath.ToSlash(path[len(src):])
-		if name == "builtin" || name == "cmd" || strings.Contains(name, ".") {
+		if name == "builtin" || name == "cmd" || strings.Contains(name, "golang_org") {
 			return filepath.SkipDir
 		}
 
@@ -454,26 +487,23 @@ func TestDependencies(t *testing.T) {
 	}
 	sort.Strings(all)
 
-	test := func(mustImport bool) {
-		for _, pkg := range all {
-			imports, err := findImports(pkg)
-			if err != nil {
-				t.Error(err)
-				continue
-			}
-			ok := allowed(pkg)
-			var bad []string
-			for _, imp := range imports {
-				if !ok[imp] {
-					bad = append(bad, imp)
-				}
-			}
-			if bad != nil {
-				t.Errorf("unexpected dependency: %s imports %v", pkg, bad)
+	for _, pkg := range all {
+		imports, err := findImports(pkg)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		ok := allowed(pkg)
+		var bad []string
+		for _, imp := range imports {
+			if !ok[imp] {
+				bad = append(bad, imp)
 			}
 		}
+		if bad != nil {
+			t.Errorf("unexpected dependency: %s imports %v", pkg, bad)
+		}
 	}
-	test(true)
 }
 
 var buildIgnore = []byte("\n// +build ignore")

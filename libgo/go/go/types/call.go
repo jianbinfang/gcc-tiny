@@ -61,14 +61,12 @@ func (check *Checker) call(x *operand, e *ast.CallExpr) exprKind {
 			return statement
 		}
 
-		arg, n, _ := unpack(func(x *operand, i int) { check.expr(x, e.Args[i]) }, len(e.Args), false)
-		if arg == nil {
+		arg, n, _ := unpack(func(x *operand, i int) { check.multiExpr(x, e.Args[i]) }, len(e.Args), false)
+		if arg != nil {
+			check.arguments(x, e, sig, arg, n)
+		} else {
 			x.mode = invalid
-			x.expr = e
-			return statement
 		}
-
-		check.arguments(x, e, sig, arg, n)
 
 		// determine result
 		switch sig.results.Len() {
@@ -81,6 +79,7 @@ func (check *Checker) call(x *operand, e *ast.CallExpr) exprKind {
 			x.mode = value
 			x.typ = sig.results
 		}
+
 		x.expr = e
 		check.hasCallOrRecv = true
 
@@ -181,14 +180,14 @@ func unpack(get getter, n int, allowCommaOk bool) (getter, int, bool) {
 func (check *Checker) arguments(x *operand, call *ast.CallExpr, sig *Signature, arg getter, n int) {
 	if call.Ellipsis.IsValid() {
 		// last argument is of the form x...
-		if len(call.Args) == 1 && n > 1 {
-			// f()... is not permitted if f() is multi-valued
-			check.errorf(call.Ellipsis, "cannot use ... with %d-valued expression %s", n, call.Args[0])
+		if !sig.variadic {
+			check.errorf(call.Ellipsis, "cannot use ... in call to non-variadic %s", call.Fun)
 			check.useGetter(arg, n)
 			return
 		}
-		if !sig.variadic {
-			check.errorf(call.Ellipsis, "cannot use ... in call to non-variadic %s", call.Fun)
+		if len(call.Args) == 1 && n > 1 {
+			// f()... is not permitted if f() is multi-valued
+			check.errorf(call.Ellipsis, "cannot use ... with %d-valued %s", n, call.Args[0])
 			check.useGetter(arg, n)
 			return
 		}
@@ -202,7 +201,7 @@ func (check *Checker) arguments(x *operand, call *ast.CallExpr, sig *Signature, 
 			if i == n-1 && call.Ellipsis.IsValid() {
 				ellipsis = call.Ellipsis
 			}
-			check.argument(sig, i, x, ellipsis)
+			check.argument(call.Fun, sig, i, x, ellipsis)
 		}
 	}
 
@@ -220,7 +219,12 @@ func (check *Checker) arguments(x *operand, call *ast.CallExpr, sig *Signature, 
 
 // argument checks passing of argument x to the i'th parameter of the given signature.
 // If ellipsis is valid, the argument is followed by ... at that position in the call.
-func (check *Checker) argument(sig *Signature, i int, x *operand, ellipsis token.Pos) {
+func (check *Checker) argument(fun ast.Expr, sig *Signature, i int, x *operand, ellipsis token.Pos) {
+	check.singleValue(x)
+	if x.mode == invalid {
+		return
+	}
+
 	n := sig.params.Len()
 
 	// determine parameter type
@@ -241,18 +245,12 @@ func (check *Checker) argument(sig *Signature, i int, x *operand, ellipsis token
 	}
 
 	if ellipsis.IsValid() {
-		// argument is of the form x...
+		// argument is of the form x... and x is single-valued
 		if i != n-1 {
 			check.errorf(ellipsis, "can only use ... with matching parameter")
 			return
 		}
-		switch t := x.typ.Underlying().(type) {
-		case *Slice:
-			// ok
-		case *Tuple:
-			check.errorf(ellipsis, "cannot use ... with %d-valued expression %s", t.Len(), x)
-			return
-		default:
+		if _, ok := x.typ.Underlying().(*Slice); !ok {
 			check.errorf(x.pos(), "cannot use %s as parameter of type %s", x, typ)
 			return
 		}
@@ -261,9 +259,7 @@ func (check *Checker) argument(sig *Signature, i int, x *operand, ellipsis token
 		typ = typ.(*Slice).elem
 	}
 
-	if !check.assignment(x, typ) && x.mode != invalid {
-		check.errorf(x.pos(), "cannot pass argument %s to parameter of type %s", x, typ)
-	}
+	check.assignment(x, typ, check.sprintf("argument to %s", fun))
 }
 
 func (check *Checker) selector(x *operand, e *ast.SelectorExpr) {
@@ -279,24 +275,34 @@ func (check *Checker) selector(x *operand, e *ast.SelectorExpr) {
 	// so we don't need a "package" mode for operands: package names
 	// can only appear in qualified identifiers which are mapped to
 	// selector expressions.
+	// (see also decl.go: checker.aliasDecl)
+	// TODO(gri) factor this code out and share with checker.aliasDecl
 	if ident, ok := e.X.(*ast.Ident); ok {
 		_, obj := check.scope.LookupParent(ident.Name, check.pos)
-		if pkg, _ := obj.(*PkgName); pkg != nil {
-			assert(pkg.pkg == check.pkg)
-			check.recordUse(ident, pkg)
-			pkg.used = true
-			exp := pkg.imported.scope.Lookup(sel)
+		if pname, _ := obj.(*PkgName); pname != nil {
+			assert(pname.pkg == check.pkg)
+			check.recordUse(ident, pname)
+			pname.used = true
+			pkg := pname.imported
+			exp := pkg.scope.Lookup(sel)
 			if exp == nil {
-				if !pkg.imported.fake {
-					check.errorf(e.Pos(), "%s not declared by package %s", sel, ident)
+				if !pkg.fake {
+					check.errorf(e.Pos(), "%s not declared by package %s", sel, pkg.name)
 				}
 				goto Error
 			}
 			if !exp.Exported() {
-				check.errorf(e.Pos(), "%s not exported by package %s", sel, ident)
+				check.errorf(e.Pos(), "%s not exported by package %s", sel, pkg.name)
 				// ok to continue
 			}
 			check.recordUse(e.Sel, exp)
+			exp = original(exp)
+
+			// avoid further errors if the imported object is an alias that's broken
+			if exp == nil {
+				goto Error
+			}
+
 			// Simplified version of the code for *ast.Idents:
 			// - imported objects are always fully initialized
 			switch exp := exp.(type) {
@@ -319,6 +325,7 @@ func (check *Checker) selector(x *operand, e *ast.SelectorExpr) {
 				x.typ = exp.typ
 				x.id = exp.id
 			default:
+				check.dump("unexpected object %v", exp)
 				unreachable()
 			}
 			x.expr = e

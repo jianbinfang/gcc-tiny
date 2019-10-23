@@ -1,5 +1,5 @@
 /* RunTime Type Identification
-   Copyright (C) 1995-2015 Free Software Foundation, Inc.
+   Copyright (C) 1995-2017 Free Software Foundation, Inc.
    Mostly written by Jason Merrill (jason@cygnus.com).
 
 This file is part of GCC.
@@ -23,6 +23,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "coretypes.h"
 #include "target.h"
 #include "cp-tree.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "stringpool.h"
 #include "intl.h"
@@ -242,7 +243,7 @@ get_tinfo_decl_dynamic (tree exp, tsubst_flags_t complain)
   if (error_operand_p (exp))
     return error_mark_node;
 
-  exp = resolve_nondeduced_context (exp);
+  exp = resolve_nondeduced_context (exp, complain);
 
   /* peel back references, so they match.  */
   type = non_reference (TREE_TYPE (exp));
@@ -507,12 +508,13 @@ get_typeid (tree type, tsubst_flags_t complain)
 static tree
 ifnonnull (tree test, tree result, tsubst_flags_t complain)
 {
-  return build3 (COND_EXPR, TREE_TYPE (result),
-		 build2 (EQ_EXPR, boolean_type_node, test,
-			 cp_convert (TREE_TYPE (test), nullptr_node,
-				     complain)),
-		 cp_convert (TREE_TYPE (result), nullptr_node, complain),
-		 result);
+  tree cond = build2 (NE_EXPR, boolean_type_node, test,
+		      cp_convert (TREE_TYPE (test), nullptr_node, complain));
+  /* This is a compiler generated comparison, don't emit
+     e.g. -Wnonnull-compare warning for it.  */
+  TREE_NO_WARNING (cond) = 1;
+  return build3 (COND_EXPR, TREE_TYPE (result), cond, result,
+		 cp_convert (TREE_TYPE (result), nullptr_node, complain));
 }
 
 /* Execute a dynamic cast, as described in section 5.2.6 of the 9/93 working
@@ -854,7 +856,7 @@ involves_incomplete_p (tree type)
     case UNION_TYPE:
       if (!COMPLETE_TYPE_P (type))
 	return true;
-
+      /* Fall through.  */
     default:
       /* All other types do not involve incomplete class types.  */
       return false;
@@ -982,6 +984,14 @@ ptr_initializer (tinfo_s *ti, tree target)
     {
       flags |= 0x20;
       to = tx_unsafe_fn_variant (to);
+    }
+  if (flag_noexcept_type
+      && (TREE_CODE (to) == FUNCTION_TYPE
+	  || TREE_CODE (to) == METHOD_TYPE)
+      && TYPE_NOTHROW_P (to))
+    {
+      flags |= 0x40;
+      to = build_exception_variant (to, NULL_TREE);
     }
   CONSTRUCTOR_APPEND_ELT (v, NULL_TREE, init);
   CONSTRUCTOR_APPEND_ELT (v, NULL_TREE, build_int_cst (NULL_TREE, flags));
@@ -1292,7 +1302,8 @@ get_pseudo_ti_index (tree type)
 	  ix = TK_CLASS_TYPE;
 	  break;
 	}
-      else if (!BINFO_N_BASE_BINFOS (TYPE_BINFO (type)))
+      else if (!TYPE_BINFO (type)
+	       || !BINFO_N_BASE_BINFOS (TYPE_BINFO (type)))
 	{
 	  ix = TK_CLASS_TYPE;
 	  break;
@@ -1602,7 +1613,7 @@ emit_tinfo_decl (tree decl)
       /* Avoid targets optionally bumping up the alignment to improve
 	 vector instruction accesses, tinfo are never accessed this way.  */
 #ifdef DATA_ABI_ALIGNMENT
-      DECL_ALIGN (decl) = DATA_ABI_ALIGNMENT (decl, TYPE_ALIGN (TREE_TYPE (decl)));
+      SET_DECL_ALIGN (decl, DATA_ABI_ALIGNMENT (decl, TYPE_ALIGN (TREE_TYPE (decl))));
       DECL_USER_ALIGN (decl) = true;
 #endif
       return true;

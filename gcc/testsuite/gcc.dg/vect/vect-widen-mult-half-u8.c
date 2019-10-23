@@ -2,7 +2,6 @@
 /* { dg-additional-options "-fno-ipa-icf" } */
 
 #include "tree-vect.h"
-#include <stdlib.h>
 
 #define N 32
 #define COEF 32470
@@ -31,6 +30,8 @@ bar ()
 int main (void)
 {
   int i;
+
+  check_vect ();
 
   for (i = 0; i < N; i++)
     {

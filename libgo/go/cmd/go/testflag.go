@@ -50,6 +50,8 @@ var testFlagDefn = []*testFlagSpec{
 	{name: "memprofilerate", passToTest: true},
 	{name: "blockprofile", passToTest: true},
 	{name: "blockprofilerate", passToTest: true},
+	{name: "mutexprofile", passToTest: true},
+	{name: "mutexprofilefraction", passToTest: true},
 	{name: "outputdir", passToTest: true},
 	{name: "parallel", passToTest: true},
 	{name: "run", passToTest: true},
@@ -87,6 +89,7 @@ func init() {
 func testFlags(args []string) (packageNames, passToTest []string) {
 	inPkg := false
 	outputDir := ""
+	var explicitArgs []string
 	for i := 0; i < len(args); i++ {
 		if !strings.HasPrefix(args[i], "-") {
 			if !inPkg && packageNames == nil {
@@ -113,6 +116,12 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 			if packageNames == nil {
 				// make non-nil: we have seen the empty package list
 				packageNames = []string{}
+			}
+			if args[i] == "-args" || args[i] == "--args" {
+				// -args or --args signals that everything that follows
+				// should be passed to the test.
+				explicitArgs = args[i+1:]
+				break
 			}
 			passToTest = append(passToTest, args[i])
 			continue
@@ -142,9 +151,11 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 				testBench = true
 			case "timeout":
 				testTimeout = value
-			case "blockprofile", "cpuprofile", "memprofile", "trace":
+			case "blockprofile", "cpuprofile", "memprofile", "mutexprofile":
 				testProfile = true
 				testNeedBinary = true
+			case "trace":
+				testProfile = true
 			case "coverpkg":
 				testCover = true
 				if value == "" {
@@ -191,6 +202,8 @@ func testFlags(args []string) (packageNames, passToTest []string) {
 		}
 		passToTest = append(passToTest, "-test.outputdir", dir)
 	}
+
+	passToTest = append(passToTest, explicitArgs...)
 	return
 }
 

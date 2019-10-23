@@ -1,6 +1,6 @@
 /* Gimple IR definitions.
 
-   Copyright (C) 2007-2015 Free Software Foundation, Inc.
+   Copyright (C) 2007-2017 Free Software Foundation, Inc.
    Contributed by Aldy Hernandez <aldyh@redhat.com>
 
 This file is part of GCC.
@@ -145,7 +145,10 @@ enum gf_mask {
     GF_CALL_INTERNAL		= 1 << 6,
     GF_CALL_CTRL_ALTERING       = 1 << 7,
     GF_CALL_WITH_BOUNDS 	= 1 << 8,
+    GF_CALL_MUST_TAIL_CALL	= 1 << 9,
+    GF_CALL_BY_DESCRIPTOR	= 1 << 10,
     GF_OMP_PARALLEL_COMBINED	= 1 << 0,
+    GF_OMP_PARALLEL_GRID_PHONY = 1 << 1,
     GF_OMP_TASK_TASKLOOP	= 1 << 0,
     GF_OMP_FOR_KIND_MASK	= (1 << 4) - 1,
     GF_OMP_FOR_KIND_FOR		= 0,
@@ -153,12 +156,20 @@ enum gf_mask {
     GF_OMP_FOR_KIND_TASKLOOP	= 2,
     GF_OMP_FOR_KIND_CILKFOR     = 3,
     GF_OMP_FOR_KIND_OACC_LOOP	= 4,
+    GF_OMP_FOR_KIND_GRID_LOOP = 5,
     /* Flag for SIMD variants of OMP_FOR kinds.  */
     GF_OMP_FOR_SIMD		= 1 << 3,
     GF_OMP_FOR_KIND_SIMD	= GF_OMP_FOR_SIMD | 0,
     GF_OMP_FOR_KIND_CILKSIMD	= GF_OMP_FOR_SIMD | 1,
     GF_OMP_FOR_COMBINED		= 1 << 4,
     GF_OMP_FOR_COMBINED_INTO	= 1 << 5,
+    /* The following flag must not be used on GF_OMP_FOR_KIND_GRID_LOOP loop
+       statements.  */
+    GF_OMP_FOR_GRID_PHONY	= 1 << 6,
+    /* The following two flags should only be set on GF_OMP_FOR_KIND_GRID_LOOP
+       loop statements.  */
+    GF_OMP_FOR_GRID_INTRA_GROUP	= 1 << 6,
+    GF_OMP_FOR_GRID_GROUP_ITER  = 1 << 7,
     GF_OMP_TARGET_KIND_MASK	= (1 << 4) - 1,
     GF_OMP_TARGET_KIND_REGION	= 0,
     GF_OMP_TARGET_KIND_DATA	= 1,
@@ -172,6 +183,7 @@ enum gf_mask {
     GF_OMP_TARGET_KIND_OACC_ENTER_EXIT_DATA = 9,
     GF_OMP_TARGET_KIND_OACC_DECLARE = 10,
     GF_OMP_TARGET_KIND_OACC_HOST_DATA = 11,
+    GF_OMP_TEAMS_GRID_PHONY	= 1 << 0,
 
     /* True on an GIMPLE_OMP_RETURN statement if the return does not require
        a thread synchronization via some sort of barrier.  The exact barrier
@@ -733,7 +745,7 @@ struct GTY((tag("GSS_OMP_SINGLE_LAYOUT")))
 {
   /* [ WORD 1-7 ] : base class */
 
-  /* [ WORD 7 ]  */
+  /* [ WORD 8 ]  */
   tree clauses;
 };
 
@@ -1454,6 +1466,7 @@ gomp_task *gimple_build_omp_task (gimple_seq, tree, tree, tree, tree,
 				       tree, tree);
 gimple *gimple_build_omp_section (gimple_seq);
 gimple *gimple_build_omp_master (gimple_seq);
+gimple *gimple_build_omp_grid_body (gimple_seq);
 gimple *gimple_build_omp_taskgroup (gimple_seq);
 gomp_continue *gimple_build_omp_continue (tree, tree);
 gomp_ordered *gimple_build_omp_ordered (gimple_seq, tree);
@@ -1519,6 +1532,8 @@ extern void preprocess_case_label_vec_for_gimple (vec<tree>, tree, tree *);
 extern void gimple_seq_set_location (gimple_seq, location_t);
 extern void gimple_seq_discard (gimple_seq);
 extern void maybe_remove_unused_call_args (struct function *, gimple *);
+extern bool gimple_inexpensive_call_p (gcall *);
+extern bool stmt_can_terminate_bb_p (gimple *);
 
 /* Formal (expression) temporary table handling: multiple occurrences of
    the same scalar expression are evaluated into the same temporary.  */
@@ -1714,6 +1729,7 @@ gimple_has_substatements (gimple *g)
     case GIMPLE_OMP_CRITICAL:
     case GIMPLE_WITH_CLEANUP_EXPR:
     case GIMPLE_TRANSACTION:
+    case GIMPLE_OMP_GRID_BODY:
       return true;
 
     default:
@@ -2912,6 +2928,16 @@ gimple_call_internal_unique_p (const gimple *gs)
   return gimple_call_internal_unique_p (gc);
 }
 
+/* Return true if GS is an internal function FN.  */
+
+static inline bool
+gimple_call_internal_p (const gimple *gs, internal_fn fn)
+{
+  return (is_gimple_call (gs)
+	  && gimple_call_internal_p (gs)
+	  && gimple_call_internal_fn (gs) == fn);
+}
+
 /* If CTRL_ALTERING_P is true, mark GIMPLE_CALL S to be a stmt
    that could alter control flow.  */
 
@@ -3203,6 +3229,25 @@ gimple_call_tail_p (gcall *s)
   return (s->subcode & GF_CALL_TAILCALL) != 0;
 }
 
+/* Mark (or clear) call statement S as requiring tail call optimization.  */
+
+static inline void
+gimple_call_set_must_tail (gcall *s, bool must_tail_p)
+{
+  if (must_tail_p)
+    s->subcode |= GF_CALL_MUST_TAIL_CALL;
+  else
+    s->subcode &= ~GF_CALL_MUST_TAIL_CALL;
+}
+
+/* Return true if call statement has been marked as requiring
+   tail call optimization.  */
+
+static inline bool
+gimple_call_must_tail_p (const gcall *s)
+{
+  return (s->subcode & GF_CALL_MUST_TAIL_CALL) != 0;
+}
 
 /* If RETURN_SLOT_OPT_P is true mark GIMPLE_CALL S as valid for return
    slot optimization.  This transformation uses the target of the call
@@ -3328,6 +3373,26 @@ static inline bool
 gimple_call_alloca_for_var_p (gcall *s)
 {
   return (s->subcode & GF_CALL_ALLOCA_FOR_VAR) != 0;
+}
+
+/* If BY_DESCRIPTOR_P is true, GIMPLE_CALL S is an indirect call for which
+   pointers to nested function are descriptors instead of trampolines.  */
+
+static inline void
+gimple_call_set_by_descriptor (gcall  *s, bool by_descriptor_p)
+{
+  if (by_descriptor_p)
+    s->subcode |= GF_CALL_BY_DESCRIPTOR;
+  else
+    s->subcode &= ~GF_CALL_BY_DESCRIPTOR;
+}
+
+/* Return true if S is a by-descriptor call.  */
+
+static inline bool
+gimple_call_by_descriptor_p (gcall *s)
+{
+  return (s->subcode & GF_CALL_BY_DESCRIPTOR) != 0;
 }
 
 /* Copy all the GF_CALL_* flags from ORIG_CALL to DEST_CALL.  */
@@ -5079,6 +5144,75 @@ gimple_omp_for_set_pre_body (gimple *gs, gimple_seq pre_body)
   omp_for_stmt->pre_body = pre_body;
 }
 
+/* Return the kernel_phony of OMP_FOR statement.  */
+
+static inline bool
+gimple_omp_for_grid_phony (const gomp_for *omp_for)
+{
+  gcc_checking_assert (gimple_omp_for_kind (omp_for)
+		       != GF_OMP_FOR_KIND_GRID_LOOP);
+  return (gimple_omp_subcode (omp_for) & GF_OMP_FOR_GRID_PHONY) != 0;
+}
+
+/* Set kernel_phony flag of OMP_FOR to VALUE.  */
+
+static inline void
+gimple_omp_for_set_grid_phony (gomp_for *omp_for, bool value)
+{
+  gcc_checking_assert (gimple_omp_for_kind (omp_for)
+		       != GF_OMP_FOR_KIND_GRID_LOOP);
+  if (value)
+    omp_for->subcode |= GF_OMP_FOR_GRID_PHONY;
+  else
+    omp_for->subcode &= ~GF_OMP_FOR_GRID_PHONY;
+}
+
+/* Return the kernel_intra_group of a GRID_LOOP OMP_FOR statement.  */
+
+static inline bool
+gimple_omp_for_grid_intra_group (const gomp_for *omp_for)
+{
+  gcc_checking_assert (gimple_omp_for_kind (omp_for)
+		       == GF_OMP_FOR_KIND_GRID_LOOP);
+  return (gimple_omp_subcode (omp_for) & GF_OMP_FOR_GRID_INTRA_GROUP) != 0;
+}
+
+/* Set kernel_intra_group flag of OMP_FOR to VALUE.  */
+
+static inline void
+gimple_omp_for_set_grid_intra_group (gomp_for *omp_for, bool value)
+{
+  gcc_checking_assert (gimple_omp_for_kind (omp_for)
+		       == GF_OMP_FOR_KIND_GRID_LOOP);
+  if (value)
+    omp_for->subcode |= GF_OMP_FOR_GRID_INTRA_GROUP;
+  else
+    omp_for->subcode &= ~GF_OMP_FOR_GRID_INTRA_GROUP;
+}
+
+/* Return true if iterations of a grid OMP_FOR statement correspond to HSA
+   groups.  */
+
+static inline bool
+gimple_omp_for_grid_group_iter (const gomp_for *omp_for)
+{
+  gcc_checking_assert (gimple_omp_for_kind (omp_for)
+		       == GF_OMP_FOR_KIND_GRID_LOOP);
+  return (gimple_omp_subcode (omp_for) & GF_OMP_FOR_GRID_GROUP_ITER) != 0;
+}
+
+/* Set group_iter flag of OMP_FOR to VALUE.  */
+
+static inline void
+gimple_omp_for_set_grid_group_iter (gomp_for *omp_for, bool value)
+{
+  gcc_checking_assert (gimple_omp_for_kind (omp_for)
+		       == GF_OMP_FOR_KIND_GRID_LOOP);
+  if (value)
+    omp_for->subcode |= GF_OMP_FOR_GRID_GROUP_ITER;
+  else
+    omp_for->subcode &= ~GF_OMP_FOR_GRID_GROUP_ITER;
+}
 
 /* Return the clauses associated with OMP_PARALLEL GS.  */
 
@@ -5165,6 +5299,24 @@ gimple_omp_parallel_set_data_arg (gomp_parallel *omp_parallel_stmt,
   omp_parallel_stmt->data_arg = data_arg;
 }
 
+/* Return the kernel_phony flag of OMP_PARALLEL_STMT.  */
+
+static inline bool
+gimple_omp_parallel_grid_phony (const gomp_parallel *stmt)
+{
+  return (gimple_omp_subcode (stmt) & GF_OMP_PARALLEL_GRID_PHONY) != 0;
+}
+
+/* Set kernel_phony flag of OMP_PARALLEL_STMT to VALUE.  */
+
+static inline void
+gimple_omp_parallel_set_grid_phony (gomp_parallel *stmt, bool value)
+{
+  if (value)
+    stmt->subcode |= GF_OMP_PARALLEL_GRID_PHONY;
+  else
+    stmt->subcode &= ~GF_OMP_PARALLEL_GRID_PHONY;
+}
 
 /* Return the clauses associated with OMP_TASK GS.  */
 
@@ -5638,6 +5790,24 @@ gimple_omp_teams_set_clauses (gomp_teams *omp_teams_stmt, tree clauses)
   omp_teams_stmt->clauses = clauses;
 }
 
+/* Return the kernel_phony flag of an OMP_TEAMS_STMT.  */
+
+static inline bool
+gimple_omp_teams_grid_phony (const gomp_teams *omp_teams_stmt)
+{
+  return (gimple_omp_subcode (omp_teams_stmt) & GF_OMP_TEAMS_GRID_PHONY) != 0;
+}
+
+/* Set kernel_phony flag of an OMP_TEAMS_STMT to VALUE.  */
+
+static inline void
+gimple_omp_teams_set_grid_phony (gomp_teams *omp_teams_stmt, bool value)
+{
+  if (value)
+    omp_teams_stmt->subcode |= GF_OMP_TEAMS_GRID_PHONY;
+  else
+    omp_teams_stmt->subcode &= ~GF_OMP_TEAMS_GRID_PHONY;
+}
 
 /* Return the clauses associated with OMP_SECTIONS GS.  */
 
@@ -6002,7 +6172,8 @@ gimple_return_set_retbnd (gimple *gs, tree retval)
     case GIMPLE_OMP_RETURN:			\
     case GIMPLE_OMP_ATOMIC_LOAD:		\
     case GIMPLE_OMP_ATOMIC_STORE:		\
-    case GIMPLE_OMP_CONTINUE
+    case GIMPLE_OMP_CONTINUE:			\
+    case GIMPLE_OMP_GRID_BODY
 
 static inline bool
 is_gimple_omp (const gimple *stmt)

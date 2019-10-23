@@ -96,13 +96,17 @@ AM_CONDITIONAL(LSAN_SUPPORTED, [test "x$LSAN_SUPPORTED" = "xyes"])
 AC_CHECK_FUNCS(clock_getres clock_gettime clock_settime)
 
 # Common libraries that we need to link against for all sanitizer libs.
-link_sanitizer_common='-lpthread -ldl -lm'
+link_sanitizer_common='-lpthread -lm'
 
 # At least for glibc, shm_open is in librt.  But don't pull that
 # in if it still doesn't give us the function we want.  This
 # test is copied from libgomp.
 AC_CHECK_LIB(rt, shm_open,
   [link_sanitizer_common="-lrt $link_sanitizer_common"])
+
+# Do a configure time check for -ldl
+AC_CHECK_LIB(dl, dlsym,
+  [link_sanitizer_common="-ldl $link_sanitizer_common"])
 
 # Set up the set of additional libraries that we need to link against for libasan.
 link_libasan=$link_sanitizer_common
@@ -335,30 +339,6 @@ fi
 
 AC_SUBST([RPC_DEFS], [$rpc_defs])
 
-dnl If this file is processed by autoconf-2.67 or later then the CPPFLAGS
-dnl "-o conftest.iii" can disappear, conftest.iii be replaced with
-dnl conftest.i in the sed command line, and the rm deleted.
-dnl Not all cpp's accept -o, and gcc -E does not accept a second file
-dnl argument as the output file.
-AC_CACHE_CHECK([obstack params],
-[libsanitizer_cv_sys_obstack],
-[save_cppflags=$CPPFLAGS
-CPPFLAGS="-I${srcdir}/../include -o conftest.iii $CPPFLAGS"
-AC_PREPROC_IFELSE([AC_LANG_SOURCE([
-#include "obstack.h"
-#ifdef _OBSTACK_SIZE_T
-_OBSTACK_SIZE_T
-#else
-int
-#endif
-])],
-[libsanitizer_cv_sys_obstack=`sed -e '/^#/d;/^[	 ]*$/d' conftest.iii | sed -e '$!d;s/size_t/SIZE_T/'`],
-[libsanitizer_cv_sys_obstack=int])
-CPPFLAGS=$save_cppflags
-rm -f conftest.iii
-])
-AC_SUBST([OBSTACK_DEFS], [-D_OBSTACK_SIZE_T=\"$libsanitizer_cv_sys_obstack\"])
-
 AM_CONDITIONAL(LIBBACKTRACE_SUPPORTED,
 	       [test "x${BACKTRACE_SUPPORTED}x${BACKTRACE_USES_MALLOC}" = "x1x0"])
 
@@ -395,5 +375,9 @@ _EOF
 fi
 
 AC_SUBST([TSAN_TARGET_DEPENDENT_OBJECTS])
+AC_SUBST([SANITIZER_COMMON_TARGET_DEPENDENT_OBJECTS])
+
+# Determine what GCC version number to use in filesystem paths.
+GCC_BASE_VER
 
 AC_OUTPUT

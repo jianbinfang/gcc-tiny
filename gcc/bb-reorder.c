@@ -1,5 +1,5 @@
 /* Basic block reordering routines for the GNU compiler.
-   Copyright (C) 2000-2015 Free Software Foundation, Inc.
+   Copyright (C) 2000-2017 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -91,6 +91,7 @@
 */
 
 #include "config.h"
+#define INCLUDE_ALGORITHM /* stable_sort */
 #include "system.h"
 #include "coretypes.h"
 #include "backend.h"
@@ -99,13 +100,13 @@
 #include "tree.h"
 #include "cfghooks.h"
 #include "df.h"
+#include "memmodel.h"
 #include "optabs.h"
 #include "regs.h"
 #include "emit-rtl.h"
 #include "output.h"
 #include "expr.h"
 #include "params.h"
-#include "toplev.h" /* user_defined_section_attribute */
 #include "tree-pass.h"
 #include "cfgrtl.h"
 #include "cfganal.h"
@@ -155,6 +156,10 @@ struct bbro_basic_block_data
 
   /* Which trace was this bb visited in?  */
   int visited;
+
+  /* Cached maximum frequency of interesting incoming edges.
+     Minus one means not yet computed.  */
+  int priority;
 
   /* Which heap is BB in (if any)?  */
   bb_heap_t *heap;
@@ -774,7 +779,15 @@ find_traces_1_round (int branch_th, int exec_th, gcov_type count_th,
       while (best_edge);
       trace->last = bb;
       bbd[trace->first->index].start_of_trace = *n_traces - 1;
-      bbd[trace->last->index].end_of_trace = *n_traces - 1;
+      if (bbd[trace->last->index].end_of_trace != *n_traces - 1)
+	{
+	  bbd[trace->last->index].end_of_trace = *n_traces - 1;
+	  /* Update the cached maximum frequency for interesting predecessor
+	     edges for successors of the new trace end.  */
+	  FOR_EACH_EDGE (e, ei, trace->last->succs)
+	    if (EDGE_FREQUENCY (e) > bbd[e->dest->index].priority)
+	      bbd[e->dest->index].priority = EDGE_FREQUENCY (e);
+	}
 
       /* The trace is terminated so we have to recount the keys in heap
 	 (some block can have a lower key because now one of its predecessors
@@ -844,6 +857,7 @@ copy_bb (basic_block old_bb, edge e, basic_block bb, int trace)
 	  bbd[i].end_of_trace = -1;
 	  bbd[i].in_trace = -1;
 	  bbd[i].visited = 0;
+	  bbd[i].priority = -1;
 	  bbd[i].heap = NULL;
 	  bbd[i].node = NULL;
 	}
@@ -874,7 +888,6 @@ bb_to_key (basic_block bb)
 {
   edge e;
   edge_iterator ei;
-  int priority = 0;
 
   /* Use index as key to align with its original order.  */
   if (optimize_function_for_size_p (cfun))
@@ -888,17 +901,23 @@ bb_to_key (basic_block bb)
 
   /* Prefer blocks whose predecessor is an end of some trace
      or whose predecessor edge is EDGE_DFS_BACK.  */
-  FOR_EACH_EDGE (e, ei, bb->preds)
+  int priority = bbd[bb->index].priority;
+  if (priority == -1)
     {
-      if ((e->src != ENTRY_BLOCK_PTR_FOR_FN (cfun)
-	   && bbd[e->src->index].end_of_trace >= 0)
-	  || (e->flags & EDGE_DFS_BACK))
+      priority = 0;
+      FOR_EACH_EDGE (e, ei, bb->preds)
 	{
-	  int edge_freq = EDGE_FREQUENCY (e);
+	  if ((e->src != ENTRY_BLOCK_PTR_FOR_FN (cfun)
+	       && bbd[e->src->index].end_of_trace >= 0)
+	      || (e->flags & EDGE_DFS_BACK))
+	    {
+	      int edge_freq = EDGE_FREQUENCY (e);
 
-	  if (edge_freq > priority)
-	    priority = edge_freq;
+	      if (edge_freq > priority)
+		priority = edge_freq;
+	    }
 	}
+      bbd[bb->index].priority = priority;
     }
 
   if (priority)
@@ -2252,6 +2271,7 @@ reorder_basic_blocks_software_trace_cache (void)
       bbd[i].end_of_trace = -1;
       bbd[i].in_trace = -1;
       bbd[i].visited = 0;
+      bbd[i].priority = -1;
       bbd[i].heap = NULL;
       bbd[i].node = NULL;
     }
@@ -2334,7 +2354,10 @@ reorder_basic_blocks_simple (void)
      To start with, everything points to itself, nothing is assigned yet.  */
 
   FOR_ALL_BB_FN (bb, cfun)
-    bb->aux = bb;
+    {
+      bb->aux = bb;
+      bb->flags &= ~BB_VISITED;
+    }
 
   EXIT_BLOCK_PTR_FOR_FN (cfun)->aux = 0;
 
@@ -2382,7 +2405,10 @@ reorder_basic_blocks_simple (void)
 
   basic_block last_tail = (basic_block) ENTRY_BLOCK_PTR_FOR_FN (cfun)->aux;
 
-  int current_partition = BB_PARTITION (last_tail);
+  int current_partition
+    = BB_PARTITION (last_tail == ENTRY_BLOCK_PTR_FOR_FN (cfun)
+		    ? EDGE_SUCC (ENTRY_BLOCK_PTR_FOR_FN (cfun), 0)->dest
+		    : last_tail);
   bool need_another_pass = true;
 
   for (int pass = 0; pass < 2 && need_another_pass; pass++)
@@ -2423,7 +2449,6 @@ reorder_basic_blocks_simple (void)
     {
       force_nonfallthru (e);
       e->src->aux = ENTRY_BLOCK_PTR_FOR_FN (cfun)->aux;
-      BB_COPY_PARTITION (e->src, e->dest);
     }
 }
 
@@ -2563,11 +2588,101 @@ make_pass_reorder_blocks (gcc::context *ctxt)
   return new pass_reorder_blocks (ctxt);
 }
 
+/* Duplicate a block (that we already know ends in a computed jump) into its
+   predecessors, where possible.  Return whether anything is changed.  */
+static bool
+maybe_duplicate_computed_goto (basic_block bb, int max_size)
+{
+  if (single_pred_p (bb))
+    return false;
+
+  /* Make sure that the block is small enough.  */
+  rtx_insn *insn;
+  FOR_BB_INSNS (bb, insn)
+    if (INSN_P (insn))
+      {
+	max_size -= get_attr_min_length (insn);
+	if (max_size < 0)
+	   return false;
+      }
+
+  bool changed = false;
+  edge e;
+  edge_iterator ei;
+  for (ei = ei_start (bb->preds); (e = ei_safe_edge (ei)); )
+    {
+      basic_block pred = e->src;
+
+      /* Do not duplicate BB into PRED if that is the last predecessor, or if
+	 we cannot merge a copy of BB with PRED.  */
+      if (single_pred_p (bb)
+	  || !single_succ_p (pred)
+	  || e->flags & EDGE_COMPLEX
+	  || pred->index < NUM_FIXED_BLOCKS
+	  || (JUMP_P (BB_END (pred)) && !simplejump_p (BB_END (pred)))
+	  || (JUMP_P (BB_END (pred)) && CROSSING_JUMP_P (BB_END (pred))))
+	{
+	  ei_next (&ei);
+	  continue;
+	}
+
+      if (dump_file)
+	fprintf (dump_file, "Duplicating computed goto bb %d into bb %d\n",
+		 bb->index, e->src->index);
+
+      /* Remember if PRED can be duplicated; if so, the copy of BB merged
+	 with PRED can be duplicated as well.  */
+      bool can_dup_more = can_duplicate_block_p (pred);
+
+      /* Make a copy of BB, merge it into PRED.  */
+      basic_block copy = duplicate_block (bb, e, NULL);
+      emit_barrier_after_bb (copy);
+      reorder_insns_nobb (BB_HEAD (copy), BB_END (copy), BB_END (pred));
+      merge_blocks (pred, copy);
+
+      changed = true;
+
+      /* Try to merge the resulting merged PRED into further predecessors.  */
+      if (can_dup_more)
+	maybe_duplicate_computed_goto (pred, max_size);
+    }
+
+  return changed;
+}
+
 /* Duplicate the blocks containing computed gotos.  This basically unfactors
    computed gotos that were factored early on in the compilation process to
-   speed up edge based data flow.  We used to not unfactoring them again,
-   which can seriously pessimize code with many computed jumps in the source
-   code, such as interpreters.  See e.g. PR15242.  */
+   speed up edge based data flow.  We used to not unfactor them again, which
+   can seriously pessimize code with many computed jumps in the source code,
+   such as interpreters.  See e.g. PR15242.  */
+static void
+duplicate_computed_gotos (function *fun)
+{
+  /* We are estimating the length of uncond jump insn only once
+     since the code for getting the insn length always returns
+     the minimal length now.  */
+  if (uncond_jump_length == 0)
+    uncond_jump_length = get_uncond_jump_length ();
+
+  /* Never copy a block larger than this.  */
+  int max_size
+    = uncond_jump_length * PARAM_VALUE (PARAM_MAX_GOTO_DUPLICATION_INSNS);
+
+  bool changed = false;
+
+  /* Try to duplicate all blocks that end in a computed jump and that
+     can be duplicated at all.  */
+  basic_block bb;
+  FOR_EACH_BB_FN (bb, fun)
+    if (computed_jump_p (BB_END (bb)) && can_duplicate_block_p (bb))
+      changed |= maybe_duplicate_computed_goto (bb, max_size);
+
+  /* Duplicating blocks will redirect edges and may cause hot blocks
+    previously reached by both hot and cold blocks to become dominated
+    only by cold blocks.  */
+  if (changed)
+    fixup_partitions ();
+}
 
 namespace {
 
@@ -2610,125 +2725,8 @@ pass_duplicate_computed_gotos::gate (function *fun)
 unsigned int
 pass_duplicate_computed_gotos::execute (function *fun)
 {
-  basic_block bb, new_bb;
-  bitmap candidates;
-  int max_size;
-  bool changed = false;
+  duplicate_computed_gotos (fun);
 
-  if (n_basic_blocks_for_fn (fun) <= NUM_FIXED_BLOCKS + 1)
-    return 0;
-
-  clear_bb_flags ();
-  cfg_layout_initialize (0);
-
-  /* We are estimating the length of uncond jump insn only once
-     since the code for getting the insn length always returns
-     the minimal length now.  */
-  if (uncond_jump_length == 0)
-    uncond_jump_length = get_uncond_jump_length ();
-
-  max_size
-    = uncond_jump_length * PARAM_VALUE (PARAM_MAX_GOTO_DUPLICATION_INSNS);
-  candidates = BITMAP_ALLOC (NULL);
-
-  /* Look for blocks that end in a computed jump, and see if such blocks
-     are suitable for unfactoring.  If a block is a candidate for unfactoring,
-     mark it in the candidates.  */
-  FOR_EACH_BB_FN (bb, fun)
-    {
-      rtx_insn *insn;
-      edge e;
-      edge_iterator ei;
-      int size, all_flags;
-
-      /* Build the reorder chain for the original order of blocks.  */
-      if (bb->next_bb != EXIT_BLOCK_PTR_FOR_FN (fun))
-	bb->aux = bb->next_bb;
-
-      /* Obviously the block has to end in a computed jump.  */
-      if (!computed_jump_p (BB_END (bb)))
-	continue;
-
-      /* Only consider blocks that can be duplicated.  */
-      if (CROSSING_JUMP_P (BB_END (bb))
-	  || !can_duplicate_block_p (bb))
-	continue;
-
-      /* Make sure that the block is small enough.  */
-      size = 0;
-      FOR_BB_INSNS (bb, insn)
-	if (INSN_P (insn))
-	  {
-	    size += get_attr_min_length (insn);
-	    if (size > max_size)
-	       break;
-	  }
-      if (size > max_size)
-	continue;
-
-      /* Final check: there must not be any incoming abnormal edges.  */
-      all_flags = 0;
-      FOR_EACH_EDGE (e, ei, bb->preds)
-	all_flags |= e->flags;
-      if (all_flags & EDGE_COMPLEX)
-	continue;
-
-      bitmap_set_bit (candidates, bb->index);
-    }
-
-  /* Nothing to do if there is no computed jump here.  */
-  if (bitmap_empty_p (candidates))
-    goto done;
-
-  /* Duplicate computed gotos.  */
-  FOR_EACH_BB_FN (bb, fun)
-    {
-      if (bb->flags & BB_VISITED)
-	continue;
-
-      bb->flags |= BB_VISITED;
-
-      /* BB must have one outgoing edge.  That edge must not lead to
-	 the exit block or the next block.
-	 The destination must have more than one predecessor.  */
-      if (!single_succ_p (bb)
-	  || single_succ (bb) == EXIT_BLOCK_PTR_FOR_FN (fun)
-	  || single_succ (bb) == bb->next_bb
-	  || single_pred_p (single_succ (bb)))
-	continue;
-
-      /* The successor block has to be a duplication candidate.  */
-      if (!bitmap_bit_p (candidates, single_succ (bb)->index))
-	continue;
-
-      /* Don't duplicate a partition crossing edge, which requires difficult
-         fixup.  */
-      if (JUMP_P (BB_END (bb)) && CROSSING_JUMP_P (BB_END (bb)))
-	continue;
-
-      new_bb = duplicate_block (single_succ (bb), single_succ_edge (bb), bb);
-      new_bb->aux = bb->aux;
-      bb->aux = new_bb;
-      new_bb->flags |= BB_VISITED;
-      changed = true;
-    }
-
- done:
-  if (changed)
-    {
-      /* Duplicating blocks above will redirect edges and may cause hot
-	 blocks previously reached by both hot and cold blocks to become
-	 dominated only by cold blocks.  */
-      fixup_partitions ();
-
-      /* Merge the duplicated blocks into predecessors, when possible.  */
-      cfg_layout_finalize ();
-      cleanup_cfg (0);
-    }
-  else
-    cfg_layout_finalize ();
-
-  BITMAP_FREE (candidates);
   return 0;
 }
 
@@ -2866,11 +2864,11 @@ pass_partition_blocks::gate (function *fun)
      arises.  */
   return (flag_reorder_blocks_and_partition
 	  && optimize
-	  /* See gate_handle_reorder_blocks.  We should not partition if
+	  /* See pass_reorder_blocks::gate.  We should not partition if
 	     we are going to omit the reordering.  */
 	  && optimize_function_for_speed_p (fun)
 	  && !DECL_COMDAT_GROUP (current_function_decl)
-	  && !user_defined_section_attribute);
+	  && !lookup_attribute ("section", DECL_ATTRIBUTES (fun->decl)));
 }
 
 unsigned
@@ -2885,7 +2883,8 @@ pass_partition_blocks::execute (function *fun)
 
   crossing_edges = find_rarely_executed_basic_blocks_and_crossing_edges ();
   if (!crossing_edges.exists ())
-    return 0;
+    /* Make sure to process deferred rescans and clear changeable df flags.  */
+    return TODO_df_finish;
 
   crtl->has_bb_partition = true;
 
@@ -2951,7 +2950,8 @@ pass_partition_blocks::execute (function *fun)
       df_analyze ();
     }
 
-  return 0;
+  /* Make sure to process deferred rescans and clear changeable df flags.  */
+  return TODO_df_finish;
 }
 
 } // anon namespace

@@ -1,5 +1,5 @@
 /* Variable tracking routines for the GNU compiler.
-   Copyright (C) 2002-2015 Free Software Foundation, Inc.
+   Copyright (C) 2002-2017 Free Software Foundation, Inc.
 
    This file is part of GCC.
 
@@ -95,6 +95,7 @@
 #include "cfghooks.h"
 #include "alloc-pool.h"
 #include "tree-pass.h"
+#include "memmodel.h"
 #include "tm_p.h"
 #include "insn-config.h"
 #include "regs.h"
@@ -871,7 +872,7 @@ vt_stack_adjustments (void)
 	     pointer is often restored via a load-multiple instruction
 	     and so no stack_adjust offset is recorded for it.  This means
 	     that the stack offset at the end of the epilogue block is the
-	     the same as the offset before the epilogue, whereas other paths
+	     same as the offset before the epilogue, whereas other paths
 	     to the exit block will have the correct stack_adjust.
 
 	     It is safe to ignore these differences because (a) we never
@@ -926,7 +927,7 @@ struct adjust_mem_data
   bool store;
   machine_mode mem_mode;
   HOST_WIDE_INT stack_adjust;
-  rtx_expr_list *side_effects;
+  auto_vec<rtx> side_effects;
 };
 
 /* Helper for adjust_mems.  Return true if X is suitable for
@@ -1056,6 +1057,7 @@ adjust_mems (rtx loc, const_rtx old_rtx, void *data)
 					 ? GET_MODE_SIZE (amd->mem_mode)
 					 : -GET_MODE_SIZE (amd->mem_mode),
 					 GET_MODE (loc)));
+      /* FALLTHRU */
     case POST_INC:
     case POST_DEC:
       if (addr == loc)
@@ -1072,12 +1074,11 @@ adjust_mems (rtx loc, const_rtx old_rtx, void *data)
       amd->store = false;
       tem = simplify_replace_fn_rtx (tem, old_rtx, adjust_mems, data);
       amd->store = store_save;
-      amd->side_effects = alloc_EXPR_LIST (0,
-					   gen_rtx_SET (XEXP (loc, 0), tem),
-					   amd->side_effects);
+      amd->side_effects.safe_push (gen_rtx_SET (XEXP (loc, 0), tem));
       return addr;
     case PRE_MODIFY:
       addr = XEXP (loc, 1);
+      /* FALLTHRU */
     case POST_MODIFY:
       if (addr == loc)
 	addr = XEXP (loc, 0);
@@ -1088,9 +1089,7 @@ adjust_mems (rtx loc, const_rtx old_rtx, void *data)
       tem = simplify_replace_fn_rtx (XEXP (loc, 1), old_rtx,
 				     adjust_mems, data);
       amd->store = store_save;
-      amd->side_effects = alloc_EXPR_LIST (0,
-					   gen_rtx_SET (XEXP (loc, 0), tem),
-					   amd->side_effects);
+      amd->side_effects.safe_push (gen_rtx_SET (XEXP (loc, 0), tem));
       return addr;
     case SUBREG:
       /* First try without delegitimization of whole MEMs and
@@ -1184,7 +1183,6 @@ adjust_mem_stores (rtx loc, const_rtx expr, void *data)
 static void
 adjust_insn (basic_block bb, rtx_insn *insn)
 {
-  struct adjust_mem_data amd;
   rtx set;
 
 #ifdef HAVE_window_save
@@ -1213,9 +1211,9 @@ adjust_insn (basic_block bb, rtx_insn *insn)
     }
 #endif
 
+  adjust_mem_data amd;
   amd.mem_mode = VOIDmode;
   amd.stack_adjust = -VTI (bb)->out.stack_adjust;
-  amd.side_effects = NULL;
 
   amd.store = true;
   note_stores (PATTERN (insn), adjust_mem_stores, &amd);
@@ -1281,10 +1279,10 @@ adjust_insn (basic_block bb, rtx_insn *insn)
 	validate_change (NULL_RTX, &SET_SRC (set), XEXP (note, 0), true);
     }
 
-  if (amd.side_effects)
+  if (!amd.side_effects.is_empty ())
     {
-      rtx *pat, new_pat, s;
-      int i, oldn, newn;
+      rtx *pat, new_pat;
+      int i, oldn;
 
       pat = &PATTERN (insn);
       if (GET_CODE (*pat) == COND_EXEC)
@@ -1293,17 +1291,18 @@ adjust_insn (basic_block bb, rtx_insn *insn)
 	oldn = XVECLEN (*pat, 0);
       else
 	oldn = 1;
-      for (s = amd.side_effects, newn = 0; s; newn++)
-	s = XEXP (s, 1);
+      unsigned int newn = amd.side_effects.length ();
       new_pat = gen_rtx_PARALLEL (VOIDmode, rtvec_alloc (oldn + newn));
       if (GET_CODE (*pat) == PARALLEL)
 	for (i = 0; i < oldn; i++)
 	  XVECEXP (new_pat, 0, i) = XVECEXP (*pat, 0, i);
       else
 	XVECEXP (new_pat, 0, 0) = *pat;
-      for (s = amd.side_effects, i = oldn; i < oldn + newn; i++, s = XEXP (s, 1))
-	XVECEXP (new_pat, 0, i) = XEXP (s, 0);
-      free_EXPR_LIST_list (&amd.side_effects);
+
+      rtx effect;
+      unsigned int j;
+      FOR_EACH_VEC_ELT_REVERSE (amd.side_effects, j, effect)
+	XVECEXP (new_pat, 0, j + oldn) = effect;
       validate_change (NULL_RTX, pat, new_pat, true);
     }
 }
@@ -1812,8 +1811,7 @@ vars_copy (variable_table_type *dst, variable_table_type *src)
 static inline tree
 var_debug_decl (tree decl)
 {
-  if (decl && TREE_CODE (decl) == VAR_DECL
-      && DECL_HAS_DEBUG_EXPR_P (decl))
+  if (decl && VAR_P (decl) && DECL_HAS_DEBUG_EXPR_P (decl))
     {
       tree debugdecl = DECL_DEBUG_EXPR (decl);
       if (DECL_P (debugdecl))
@@ -1985,7 +1983,7 @@ static bool
 negative_power_of_two_p (HOST_WIDE_INT i)
 {
   unsigned HOST_WIDE_INT x = -(unsigned HOST_WIDE_INT)i;
-  return x == (x & -x);
+  return pow2_or_zerop (x);
 }
 
 /* Strip constant offsets and alignments off of LOC.  Return the base
@@ -2224,7 +2222,7 @@ struct overlapping_mems
 };
 
 /* Remove all MEMs that overlap with COMS->LOC from the location list
-   of a hash table entry for a value.  COMS->ADDR must be a
+   of a hash table entry for a onepart variable.  COMS->ADDR must be a
    canonicalized form of COMS->LOC's address, and COMS->LOC must be
    canonicalized itself.  */
 
@@ -2235,7 +2233,7 @@ drop_overlapping_mem_locs (variable **slot, overlapping_mems *coms)
   rtx mloc = coms->loc, addr = coms->addr;
   variable *var = *slot;
 
-  if (var->onepart == ONEPART_VALUE)
+  if (var->onepart != NOT_ONEPART)
     {
       location_chain *loc, **locp;
       bool changed = false;
@@ -2557,7 +2555,7 @@ val_reset (dataflow_set *set, decl_or_value dv)
     {
       decl_or_value cdv = dv_from_value (cval);
 
-      /* Keep the remaining values connected, accummulating links
+      /* Keep the remaining values connected, accumulating links
 	 in the canonical value.  */
       for (node = var->var_part[0].loc_chain; node; node = node->next)
 	{
@@ -3152,7 +3150,7 @@ set_dv_changed (decl_or_value dv, bool newv)
     case ONEPART_DEXPR:
       if (newv)
 	NO_LOC_P (DECL_RTL_KNOWN_SET (dv_as_decl (dv))) = false;
-      /* Fall through...  */
+      /* Fall through.  */
 
     default:
       DECL_CHANGED (dv_as_decl (dv)) = newv;
@@ -4682,11 +4680,11 @@ dataflow_set_preserve_mem_locs (variable **slot, dataflow_set *set)
 	{
 	  for (loc = var->var_part[0].loc_chain; loc; loc = loc->next)
 	    {
-	      /* We want to remove dying MEMs that doesn't refer to DECL.  */
+	      /* We want to remove dying MEMs that don't refer to DECL.  */
 	      if (GET_CODE (loc->loc) == MEM
 		  && (MEM_EXPR (loc->loc) != decl
 		      || INT_MEM_OFFSET (loc->loc) != 0)
-		  && !mem_dies_at_call (loc->loc))
+		  && mem_dies_at_call (loc->loc))
 		break;
 	      /* We want to move here MEMs that do refer to DECL.  */
 	      else if (GET_CODE (loc->loc) == VALUE
@@ -4769,14 +4767,14 @@ dataflow_set_preserve_mem_locs (variable **slot, dataflow_set *set)
 }
 
 /* Remove all MEMs from the location list of a hash table entry for a
-   value.  */
+   onepart variable.  */
 
 int
 dataflow_set_remove_mem_locs (variable **slot, dataflow_set *set)
 {
   variable *var = *slot;
 
-  if (var->onepart == ONEPART_VALUE)
+  if (var->onepart != NOT_ONEPART)
     {
       location_chain *loc, **locp;
       bool changed = false;
@@ -4921,6 +4919,63 @@ onepart_variable_different_p (variable *var1, variable *var2)
   return lc1 != lc2;
 }
 
+/* Return true if one-part variables VAR1 and VAR2 are different.
+   They must be in canonical order.  */
+
+static void
+dump_onepart_variable_differences (variable *var1, variable *var2)
+{
+  location_chain *lc1, *lc2;
+
+  gcc_assert (var1 != var2);
+  gcc_assert (dump_file);
+  gcc_assert (dv_as_opaque (var1->dv) == dv_as_opaque (var2->dv));
+  gcc_assert (var1->n_var_parts == 1
+	      && var2->n_var_parts == 1);
+
+  lc1 = var1->var_part[0].loc_chain;
+  lc2 = var2->var_part[0].loc_chain;
+
+  gcc_assert (lc1 && lc2);
+
+  while (lc1 && lc2)
+    {
+      switch (loc_cmp (lc1->loc, lc2->loc))
+	{
+	case -1:
+	  fprintf (dump_file, "removed: ");
+	  print_rtl_single (dump_file, lc1->loc);
+	  lc1 = lc1->next;
+	  continue;
+	case 0:
+	  break;
+	case 1:
+	  fprintf (dump_file, "added: ");
+	  print_rtl_single (dump_file, lc2->loc);
+	  lc2 = lc2->next;
+	  continue;
+	default:
+	  gcc_unreachable ();
+	}
+      lc1 = lc1->next;
+      lc2 = lc2->next;
+    }
+
+  while (lc1)
+    {
+      fprintf (dump_file, "removed: ");
+      print_rtl_single (dump_file, lc1->loc);
+      lc1 = lc1->next;
+    }
+
+  while (lc2)
+    {
+      fprintf (dump_file, "added: ");
+      print_rtl_single (dump_file, lc2->loc);
+      lc2 = lc2->next;
+    }
+}
+
 /* Return true if variables VAR1 and VAR2 are different.  */
 
 static bool
@@ -4964,19 +5019,32 @@ dataflow_set_different (dataflow_set *old_set, dataflow_set *new_set)
 {
   variable_iterator_type hi;
   variable *var1;
+  bool diffound = false;
+  bool details = (dump_file && (dump_flags & TDF_DETAILS));
+
+#define RETRUE					\
+  do						\
+    {						\
+      if (!details)				\
+	return true;				\
+      else					\
+	diffound = true;			\
+    }						\
+  while (0)
 
   if (old_set->vars == new_set->vars)
     return false;
 
   if (shared_hash_htab (old_set->vars)->elements ()
       != shared_hash_htab (new_set->vars)->elements ())
-    return true;
+    RETRUE;
 
   FOR_EACH_HASH_TABLE_ELEMENT (*shared_hash_htab (old_set->vars),
 			       var1, variable, hi)
     {
       variable_table_type *htab = shared_hash_htab (new_set->vars);
       variable *var2 = htab->find_with_hash (var1->dv, dv_htab_hash (var1->dv));
+
       if (!var2)
 	{
 	  if (dump_file && (dump_flags & TDF_DETAILS))
@@ -4984,26 +5052,49 @@ dataflow_set_different (dataflow_set *old_set, dataflow_set *new_set)
 	      fprintf (dump_file, "dataflow difference found: removal of:\n");
 	      dump_var (var1);
 	    }
-	  return true;
+	  RETRUE;
 	}
-
-      if (variable_different_p (var1, var2))
+      else if (variable_different_p (var1, var2))
 	{
-	  if (dump_file && (dump_flags & TDF_DETAILS))
+	  if (details)
 	    {
 	      fprintf (dump_file, "dataflow difference found: "
 		       "old and new follow:\n");
 	      dump_var (var1);
+	      if (dv_onepart_p (var1->dv))
+		dump_onepart_variable_differences (var1, var2);
 	      dump_var (var2);
 	    }
-	  return true;
+	  RETRUE;
 	}
     }
 
-  /* No need to traverse the second hashtab, if both have the same number
-     of elements and the second one had all entries found in the first one,
-     then it can't have any extra entries.  */
-  return false;
+  /* There's no need to traverse the second hashtab unless we want to
+     print the details.  If both have the same number of elements and
+     the second one had all entries found in the first one, then the
+     second can't have any extra entries.  */
+  if (!details)
+    return diffound;
+
+  FOR_EACH_HASH_TABLE_ELEMENT (*shared_hash_htab (new_set->vars),
+			       var1, variable, hi)
+    {
+      variable_table_type *htab = shared_hash_htab (old_set->vars);
+      variable *var2 = htab->find_with_hash (var1->dv, dv_htab_hash (var1->dv));
+      if (!var2)
+	{
+	  if (details)
+	    {
+	      fprintf (dump_file, "dataflow difference found: addition of:\n");
+	      dump_var (var1);
+	    }
+	  RETRUE;
+	}
+    }
+
+#undef RETRUE
+
+  return diffound;
 }
 
 /* Free the contents of dataflow set SET.  */
@@ -5035,7 +5126,8 @@ tracked_record_parameter_p (tree t)
   if (TREE_CODE (type) != RECORD_TYPE)
     return false;
 
-  if (DECL_CHAIN (TYPE_FIELDS (type)) == NULL_TREE)
+  if (TYPE_FIELDS (type) == NULL_TREE
+      || DECL_CHAIN (TYPE_FIELDS (type)) == NULL_TREE)
     return false;
 
   return true;
@@ -5053,7 +5145,7 @@ track_expr_p (tree expr, bool need_rtl)
     return DECL_RTL_SET_P (expr);
 
   /* If EXPR is not a parameter or a variable do not track it.  */
-  if (TREE_CODE (expr) != VAR_DECL && TREE_CODE (expr) != PARM_DECL)
+  if (!VAR_P (expr) && TREE_CODE (expr) != PARM_DECL)
     return 0;
 
   /* It also must have a name...  */
@@ -5069,7 +5161,7 @@ track_expr_p (tree expr, bool need_rtl)
      don't need to track this expression if the ultimate declaration is
      ignored.  */
   realdecl = expr;
-  if (TREE_CODE (realdecl) == VAR_DECL && DECL_HAS_DEBUG_EXPR_P (realdecl))
+  if (VAR_P (realdecl) && DECL_HAS_DEBUG_EXPR_P (realdecl))
     {
       realdecl = DECL_DEBUG_EXPR (realdecl);
       if (!DECL_P (realdecl))
@@ -6241,11 +6333,10 @@ prepare_call_arguments (basic_block bb, rtx_insn *insn)
 		struct adjust_mem_data amd;
 		amd.mem_mode = VOIDmode;
 		amd.stack_adjust = -VTI (bb)->out.stack_adjust;
-		amd.side_effects = NULL;
 		amd.store = true;
 		mem = simplify_replace_fn_rtx (mem, NULL_RTX, adjust_mems,
 					       &amd);
-		gcc_assert (amd.side_effects == NULL_RTX);
+		gcc_assert (amd.side_effects.is_empty ());
 	      }
 	    val = cselib_lookup (mem, GET_MODE (mem), 0, VOIDmode);
 	    if (val && cselib_preserved_value_p (val))
@@ -6907,7 +6998,7 @@ vt_find_locations (void)
 {
   bb_heap_t *worklist = new bb_heap_t (LONG_MIN);
   bb_heap_t *pending = new bb_heap_t (LONG_MIN);
-  sbitmap visited, in_worklist, in_pending;
+  sbitmap in_worklist, in_pending;
   basic_block bb;
   edge e;
   int *bb_order;
@@ -6927,7 +7018,7 @@ vt_find_locations (void)
     bb_order[rc_order[i]] = i;
   free (rc_order);
 
-  visited = sbitmap_alloc (last_basic_block_for_fn (cfun));
+  auto_sbitmap visited (last_basic_block_for_fn (cfun));
   in_worklist = sbitmap_alloc (last_basic_block_for_fn (cfun));
   in_pending = sbitmap_alloc (last_basic_block_for_fn (cfun));
   bitmap_clear (in_worklist);
@@ -7096,7 +7187,6 @@ vt_find_locations (void)
   free (bb_order);
   delete worklist;
   delete pending;
-  sbitmap_free (visited);
   sbitmap_free (in_worklist);
   sbitmap_free (in_pending);
 

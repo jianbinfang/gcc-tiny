@@ -3,21 +3,26 @@
 // license that can be found in the LICENSE file.
 
 // Package sync provides basic synchronization primitives such as mutual
-// exclusion locks.  Other than the Once and WaitGroup types, most are intended
-// for use by low-level library routines.  Higher-level synchronization is
+// exclusion locks. Other than the Once and WaitGroup types, most are intended
+// for use by low-level library routines. Higher-level synchronization is
 // better done via channels and communication.
 //
 // Values containing the types defined in this package should not be copied.
 package sync
 
 import (
+	"internal/race"
 	"sync/atomic"
 	"unsafe"
 )
 
+func throw(string) // provided by runtime
+
 // A Mutex is a mutual exclusion lock.
 // Mutexes can be created as part of other structures;
 // the zero value for a Mutex is an unlocked mutex.
+//
+// A Mutex must not be copied after first use.
 type Mutex struct {
 	state int32
 	sema  uint32
@@ -41,8 +46,8 @@ const (
 func (m *Mutex) Lock() {
 	// Fast path: grab unlocked mutex.
 	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
-		if raceenabled {
-			raceAcquire(unsafe.Pointer(m))
+		if race.Enabled {
+			race.Acquire(unsafe.Pointer(m))
 		}
 		return
 	}
@@ -71,7 +76,7 @@ func (m *Mutex) Lock() {
 			// The goroutine has been woken from sleep,
 			// so we need to reset the flag in either case.
 			if new&mutexWoken == 0 {
-				panic("sync: inconsistent mutex state")
+				throw("sync: inconsistent mutex state")
 			}
 			new &^= mutexWoken
 		}
@@ -79,14 +84,14 @@ func (m *Mutex) Lock() {
 			if old&mutexLocked == 0 {
 				break
 			}
-			runtime_Semacquire(&m.sema)
+			runtime_SemacquireMutex(&m.sema)
 			awoke = true
 			iter = 0
 		}
 	}
 
-	if raceenabled {
-		raceAcquire(unsafe.Pointer(m))
+	if race.Enabled {
+		race.Acquire(unsafe.Pointer(m))
 	}
 }
 
@@ -97,15 +102,15 @@ func (m *Mutex) Lock() {
 // It is allowed for one goroutine to lock a Mutex and then
 // arrange for another goroutine to unlock it.
 func (m *Mutex) Unlock() {
-	if raceenabled {
+	if race.Enabled {
 		_ = m.state
-		raceRelease(unsafe.Pointer(m))
+		race.Release(unsafe.Pointer(m))
 	}
 
 	// Fast path: drop lock bit.
 	new := atomic.AddInt32(&m.state, -mutexLocked)
 	if (new+mutexLocked)&mutexLocked == 0 {
-		panic("sync: unlock of unlocked mutex")
+		throw("sync: unlock of unlocked mutex")
 	}
 
 	old := new

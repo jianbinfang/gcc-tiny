@@ -1,5 +1,5 @@
 /* Definitions for ARM running Linux-based GNU systems using ELF
-   Copyright (C) 1993-2015 Free Software Foundation, Inc.
+   Copyright (C) 1993-2017 Free Software Foundation, Inc.
    Contributed by Philip Blundell <philb@gnu.org>
 
    This file is part of GCC.
@@ -45,8 +45,6 @@
 #undef  TARGET_DEFAULT
 #define TARGET_DEFAULT (TARGET_ENDIAN_DEFAULT)
 
-#define SUBTARGET_CPU_DEFAULT TARGET_CPU_arm6
-
 #define SUBTARGET_EXTRA_LINK_SPEC " -m " TARGET_LINKER_EMULATION " -p"
 
 /* We do not have any MULTILIB_OPTIONS specified, so there are no
@@ -83,17 +81,6 @@
     {						\
 	GNU_USER_TARGET_OS_CPP_BUILTINS();	\
     }						\
-  while (0)
-
-/* This is how we tell the assembler that two symbols have the same value.  */
-#define ASM_OUTPUT_DEF(FILE, NAME1, NAME2) \
-  do					   \
-    {					   \
-      assemble_name (FILE, NAME1); 	   \
-      fputs (" = ", FILE);		   \
-      assemble_name (FILE, NAME2);	   \
-      fputc ('\n', FILE);		   \
-    }					   \
   while (0)
 
 #undef  FPUTYPE_DEFAULT

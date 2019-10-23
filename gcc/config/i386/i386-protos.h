@@ -1,5 +1,5 @@
 /* Definitions of target machine for GCC for IA-32.
-   Copyright (C) 1988-2015 Free Software Foundation, Inc.
+   Copyright (C) 1988-2017 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -44,12 +44,15 @@ extern bool ix86_use_pseudo_pic_reg (void);
 
 extern void ix86_reset_previous_fndecl (void);
 
+extern bool ix86_using_red_zone (void);
+
 #ifdef RTX_CODE
 extern int standard_80387_constant_p (rtx);
 extern const char *standard_80387_constant_opcode (rtx);
 extern rtx standard_80387_constant_rtx (int);
-extern int standard_sse_constant_p (rtx);
+extern int standard_sse_constant_p (rtx, machine_mode);
 extern const char *standard_sse_constant_opcode (rtx_insn *, rtx);
+extern bool ix86_standard_x87sse_constant_load_p (const rtx_insn *, rtx);
 extern bool symbolic_reference_mentioned_p (rtx);
 extern bool extended_reg_mentioned_p (rtx);
 extern bool x86_extended_QIreg_mentioned_p (rtx_insn *);
@@ -67,16 +70,17 @@ extern bool ix86_expand_set_or_movmem (rtx, rtx, rtx, rtx, rtx, rtx,
 extern bool constant_address_p (rtx);
 extern bool legitimate_pic_operand_p (rtx);
 extern bool legitimate_pic_address_disp_p (rtx);
+extern bool ix86_force_load_from_GOT_p (rtx);
 extern void print_reg (rtx, int, FILE*);
 extern void ix86_print_operand (FILE *, rtx, int);
 
 extern void split_double_mode (machine_mode, rtx[], int, rtx[], rtx[]);
 
 extern const char *output_set_got (rtx, rtx);
-extern const char *output_387_binary_op (rtx, rtx*);
-extern const char *output_387_reg_move (rtx, rtx*);
+extern const char *output_387_binary_op (rtx_insn *, rtx*);
+extern const char *output_387_reg_move (rtx_insn *, rtx*);
 extern const char *output_fix_trunc (rtx_insn *, rtx*, bool);
-extern const char *output_fp_compare (rtx, rtx*, bool, bool);
+extern const char *output_fp_compare (rtx_insn *, rtx*, bool, bool);
 extern const char *output_adjust_stack_and_probe (rtx);
 extern const char *output_probe_stack_range (rtx, rtx);
 
@@ -278,10 +282,10 @@ extern bool i386_pe_type_dllexport_p (tree);
 
 extern int i386_pe_reloc_rw_mask (void);
 
-extern rtx maybe_get_pool_constant (rtx);
-
 extern char internal_label_prefix[16];
 extern int internal_label_prefix_len;
+
+extern bool ix86_epilogue_uses (int);
 
 struct ix86_address
 {
@@ -294,8 +298,8 @@ extern int ix86_decompose_address (rtx, struct ix86_address *);
 extern int memory_address_length (rtx, bool);
 extern void x86_output_aligned_bss (FILE *, tree, const char *,
 				    unsigned HOST_WIDE_INT, int);
-extern void x86_elf_aligned_common (FILE *, const char *,
-				    unsigned HOST_WIDE_INT, int);
+extern void x86_elf_aligned_decl_common (FILE *, tree, const char *,
+					 unsigned HOST_WIDE_INT, int);
 
 #ifdef RTX_CODE
 extern void ix86_fp_comparison_codes (enum rtx_code code, enum rtx_code *,
@@ -309,6 +313,8 @@ extern enum attr_cpu ix86_schedule;
 #endif
 
 extern const char * ix86_output_call_insn (rtx_insn *insn, rtx call_op);
+extern const char * ix86_output_indirect_jmp (rtx call_op, bool ret_p);
+extern const char * ix86_output_function_return (bool long_p);
 extern bool ix86_operands_ok_for_move_multiple (rtx *operands, bool load,
 						enum machine_mode mode);
 
@@ -332,4 +338,9 @@ struct ix86_first_cycle_multipass_data_
 
 const addr_space_t ADDR_SPACE_SEG_FS = 1;
 const addr_space_t ADDR_SPACE_SEG_GS = 2;
-const addr_space_t ADDR_SPACE_SEG_TLS = 3;
+
+namespace gcc { class context; }
+class rtl_opt_pass;
+
+extern rtl_opt_pass *make_pass_insert_vzeroupper (gcc::context *);
+extern rtl_opt_pass *make_pass_stv (gcc::context *);

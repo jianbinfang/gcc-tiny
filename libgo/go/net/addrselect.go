@@ -188,15 +188,17 @@ func (s *byRFC6724) Less(i, j int) bool {
 
 	// Rule 9: Use longest matching prefix.
 	// When DA and DB belong to the same address family (both are IPv6 or
-	// both are IPv4): If CommonPrefixLen(Source(DA), DA) >
+	// both are IPv4 [but see below]): If CommonPrefixLen(Source(DA), DA) >
 	// CommonPrefixLen(Source(DB), DB), then prefer DA.  Similarly, if
 	// CommonPrefixLen(Source(DA), DA) < CommonPrefixLen(Source(DB), DB),
 	// then prefer DB.
-	da4 := DA.To4() != nil
-	db4 := DB.To4() != nil
-	if da4 == db4 {
+	//
+	// However, applying this rule to IPv4 addresses causes
+	// problems (see issues 13283 and 18518), so limit to IPv6.
+	if DA.To4() == nil && DB.To4() == nil {
 		commonA := commonPrefixLen(SourceDA, DA)
 		commonB := commonPrefixLen(SourceDB, DB)
+
 		if commonA > commonB {
 			return preferDA
 		}

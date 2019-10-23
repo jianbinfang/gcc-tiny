@@ -1,5 +1,5 @@
 /* Machine description for AArch64 architecture.
-   Copyright (C) 2009-2015 Free Software Foundation, Inc.
+   Copyright (C) 2009-2017 Free Software Foundation, Inc.
    Contributed by ARM Ltd.
 
    This file is part of GCC.
@@ -151,14 +151,21 @@ struct cpu_regmove_cost
 /* Cost for vector insn classes.  */
 struct cpu_vector_cost
 {
-  const int scalar_stmt_cost;		 /* Cost of any scalar operation,
+  const int scalar_int_stmt_cost;	 /* Cost of any int scalar operation,
+					    excluding load and store.  */
+  const int scalar_fp_stmt_cost;	 /* Cost of any fp scalar operation,
 					    excluding load and store.  */
   const int scalar_load_cost;		 /* Cost of scalar load.  */
   const int scalar_store_cost;		 /* Cost of scalar store.  */
-  const int vec_stmt_cost;		 /* Cost of any vector operation,
-					    excluding load, store,
+  const int vec_int_stmt_cost;		 /* Cost of any int vector operation,
+					    excluding load, store, permute,
 					    vector-to-scalar and
 					    scalar-to-vector operation.  */
+  const int vec_fp_stmt_cost;		 /* Cost of any fp vector operation,
+					    excluding load, store, permute,
+					    vector-to-scalar and
+					    scalar-to-vector operation.  */
+  const int vec_permute_cost;		 /* Cost of permute operation.  */
   const int vec_to_scalar_cost;		 /* Cost of vec-to-scalar operation.  */
   const int scalar_to_vec_cost;		 /* Cost of scalar-to-vector
 					    operation.  */
@@ -177,6 +184,25 @@ struct cpu_branch_cost
   const int unpredictable;  /* Unpredictable branch or optimizing for speed.  */
 };
 
+/* Control approximate alternatives to certain FP operators.  */
+#define AARCH64_APPROX_MODE(MODE) \
+  ((MIN_MODE_FLOAT <= (MODE) && (MODE) <= MAX_MODE_FLOAT) \
+   ? (1 << ((MODE) - MIN_MODE_FLOAT)) \
+   : (MIN_MODE_VECTOR_FLOAT <= (MODE) && (MODE) <= MAX_MODE_VECTOR_FLOAT) \
+     ? (1 << ((MODE) - MIN_MODE_VECTOR_FLOAT \
+	      + MAX_MODE_FLOAT - MIN_MODE_FLOAT + 1)) \
+     : (0))
+#define AARCH64_APPROX_NONE (0)
+#define AARCH64_APPROX_ALL (-1)
+
+/* Allowed modes for approximations.  */
+struct cpu_approx_modes
+{
+  const unsigned int division;		/* Division.  */
+  const unsigned int sqrt;		/* Square root.  */
+  const unsigned int recip_sqrt;	/* Reciprocal square root.  */
+};
+
 struct tune_params
 {
   const struct cpu_cost_table *insn_extra_cost;
@@ -184,6 +210,7 @@ struct tune_params
   const struct cpu_regmove_cost *regmove_cost;
   const struct cpu_vector_cost *vec_costs;
   const struct cpu_branch_cost *branch_costs;
+  const struct cpu_approx_modes *approx_modes;
   int memmov_cost;
   int issue_rate;
   unsigned int fusible_ops;
@@ -227,7 +254,6 @@ enum aarch64_fusion_pairs_index
 #include "aarch64-fusion-pairs.def"
   AARCH64_FUSE_index_END
 };
-#undef AARCH64_FUSION_PAIR
 
 #define AARCH64_FUSION_PAIR(x, name) \
   AARCH64_FUSE_##name = (1u << AARCH64_FUSE_##name##_index),
@@ -238,7 +264,6 @@ enum aarch64_fusion_pairs
 #include "aarch64-fusion-pairs.def"
   AARCH64_FUSE_ALL = (1u << AARCH64_FUSE_index_END) - 1
 };
-#undef AARCH64_FUSION_PAIR
 
 #define AARCH64_EXTRA_TUNING_OPTION(x, name) \
   AARCH64_EXTRA_TUNE_##name##_index,
@@ -248,7 +273,6 @@ enum aarch64_extra_tuning_flags_index
 #include "aarch64-tuning-flags.def"
   AARCH64_EXTRA_TUNE_index_END
 };
-#undef AARCH64_EXTRA_TUNING_OPTION
 
 
 #define AARCH64_EXTRA_TUNING_OPTION(x, name) \
@@ -260,35 +284,49 @@ enum aarch64_extra_tuning_flags
 #include "aarch64-tuning-flags.def"
   AARCH64_EXTRA_TUNE_ALL = (1u << AARCH64_EXTRA_TUNE_index_END) - 1
 };
-#undef AARCH64_EXTRA_TUNING_OPTION
+
+/* Enum describing the various ways that the
+   aarch64_parse_{arch,tune,cpu,extension} functions can fail.
+   This way their callers can choose what kind of error to give.  */
+
+enum aarch64_parse_opt_result
+{
+  AARCH64_PARSE_OK,			/* Parsing was successful.  */
+  AARCH64_PARSE_MISSING_ARG,		/* Missing argument.  */
+  AARCH64_PARSE_INVALID_FEATURE,	/* Invalid feature modifier.  */
+  AARCH64_PARSE_INVALID_ARG		/* Invalid arch, tune, cpu arg.  */
+};
 
 extern struct tune_params aarch64_tune_params;
 
 HOST_WIDE_INT aarch64_initial_elimination_offset (unsigned, unsigned);
 int aarch64_get_condition_code (rtx);
 bool aarch64_bitmask_imm (HOST_WIDE_INT val, machine_mode);
+unsigned HOST_WIDE_INT aarch64_and_split_imm1 (HOST_WIDE_INT val_in);
+unsigned HOST_WIDE_INT aarch64_and_split_imm2 (HOST_WIDE_INT val_in);
+bool aarch64_and_bitmask_imm (unsigned HOST_WIDE_INT val_in, machine_mode mode);
 int aarch64_branch_cost (bool, bool);
 enum aarch64_symbol_type aarch64_classify_symbolic_expression (rtx);
-bool aarch64_cannot_change_mode_class (machine_mode,
-				       machine_mode,
-				       enum reg_class);
 bool aarch64_const_vec_all_same_int_p (rtx, HOST_WIDE_INT);
 bool aarch64_constant_address_p (rtx);
+bool aarch64_emit_approx_div (rtx, rtx, rtx);
+bool aarch64_emit_approx_sqrt (rtx, rtx, bool);
 bool aarch64_expand_movmem (rtx *);
 bool aarch64_float_const_zero_rtx_p (rtx);
 bool aarch64_function_arg_regno_p (unsigned);
+bool aarch64_fusion_enabled_p (enum aarch64_fusion_pairs);
 bool aarch64_gen_movmemqi (rtx *);
 bool aarch64_gimple_fold_builtin (gimple_stmt_iterator *);
-bool aarch64_handle_option (struct gcc_options *, struct gcc_options *,
-			     const struct cl_decoded_option *, location_t);
 bool aarch64_is_extend_from_extract (machine_mode, rtx, rtx);
 bool aarch64_is_long_call_p (rtx);
 bool aarch64_is_noplt_call_p (rtx);
 bool aarch64_label_mentioned_p (rtx);
 void aarch64_declare_function_name (FILE *, const char*, tree);
 bool aarch64_legitimate_pic_operand_p (rtx);
+bool aarch64_mask_and_shift_for_ubfiz_p (machine_mode, rtx, rtx);
 bool aarch64_modes_tieable_p (machine_mode mode1,
 			      machine_mode mode2);
+bool aarch64_zero_extend_const_eq (machine_mode, rtx, machine_mode, rtx);
 bool aarch64_move_imm (HOST_WIDE_INT, machine_mode);
 bool aarch64_mov_operand_p (rtx, machine_mode);
 int aarch64_simd_attr_length_rglist (enum machine_mode);
@@ -308,12 +346,12 @@ bool aarch64_simd_scalar_immediate_valid_for_move (rtx, machine_mode);
 bool aarch64_simd_shift_imm_p (rtx, machine_mode, bool);
 bool aarch64_simd_valid_immediate (rtx, machine_mode, bool,
 				   struct simd_immediate_info *);
+bool aarch64_split_dimode_const_store (rtx, rtx);
 bool aarch64_symbolic_address_p (rtx);
 bool aarch64_uimm12_shift (HOST_WIDE_INT);
 bool aarch64_use_return_insn_p (void);
 const char *aarch64_mangle_builtin_type (const_tree);
 const char *aarch64_output_casesi (rtx *);
-const char *aarch64_rewrite_selected_cpu (const char *name);
 
 enum aarch64_symbol_type aarch64_classify_symbol (rtx, rtx);
 enum aarch64_symbol_type aarch64_classify_tls_symbol (rtx);
@@ -324,25 +362,21 @@ machine_mode aarch64_hard_regno_caller_save_mode (unsigned, unsigned,
 						       machine_mode);
 int aarch64_hard_regno_mode_ok (unsigned, machine_mode);
 int aarch64_hard_regno_nregs (unsigned, machine_mode);
-int aarch64_simd_attr_length_move (rtx_insn *);
 int aarch64_uxt_size (int, HOST_WIDE_INT);
 int aarch64_vec_fpconst_pow_of_2 (rtx);
-rtx aarch64_final_eh_return_addr (void);
-rtx aarch64_legitimize_reload_address (rtx *, machine_mode, int, int, int);
+rtx aarch64_eh_return_handler_rtx (void);
 rtx aarch64_mask_from_zextract_ops (rtx, rtx);
 const char *aarch64_output_move_struct (rtx *operands);
 rtx aarch64_return_addr (int, rtx);
-rtx aarch64_simd_gen_const_vector_dup (machine_mode, int);
+rtx aarch64_simd_gen_const_vector_dup (machine_mode, HOST_WIDE_INT);
 bool aarch64_simd_mem_operand_p (rtx);
 rtx aarch64_simd_vect_par_cnst_half (machine_mode, bool);
 rtx aarch64_tls_get_addr (void);
-std::string aarch64_get_extension_string_for_isa_flags (unsigned long);
 tree aarch64_fold_builtin (tree, int, tree *, bool);
 unsigned aarch64_dbx_register_number (unsigned);
 unsigned aarch64_trampoline_size (void);
 void aarch64_asm_output_labelref (FILE *, const char *);
 void aarch64_cpu_cpp_builtins (cpp_reader *);
-void aarch64_elf_asm_named_section (const char *, unsigned, tree);
 const char * aarch64_gen_far_branch (rtx *, int, const char *, const char *);
 const char * aarch64_output_probe_stack_range (rtx, rtx);
 void aarch64_err_no_fpadvsimd (machine_mode, const char *);
@@ -358,8 +392,8 @@ void aarch64_emit_call_insn (rtx);
 void aarch64_register_pragmas (void);
 void aarch64_relayout_simd_types (void);
 void aarch64_reset_previous_fndecl (void);
-
-void aarch64_emit_swrsqrt (rtx, rtx);
+bool aarch64_return_address_signing_enabled (void);
+void aarch64_save_restore_target_globals (tree);
 
 /* Initialize builtins for SIMD intrinsics.  */
 void init_aarch64_simd_builtins (void);
@@ -411,9 +445,7 @@ rtx aarch64_expand_builtin (tree exp,
 			    machine_mode mode ATTRIBUTE_UNUSED,
 			    int ignore ATTRIBUTE_UNUSED);
 tree aarch64_builtin_decl (unsigned, bool ATTRIBUTE_UNUSED);
-
 tree aarch64_builtin_rsqrt (unsigned int);
-
 tree aarch64_builtin_vectorized_function (unsigned int, tree, tree);
 
 extern void aarch64_split_combinev16qi (rtx operands[3]);
@@ -428,5 +460,19 @@ int aarch64_ccmp_mode_to_code (enum machine_mode mode);
 bool extract_base_offset_in_addr (rtx mem, rtx *base, rtx *offset);
 bool aarch64_operands_ok_for_ldpstp (rtx *, bool, enum machine_mode);
 bool aarch64_operands_adjust_ok_for_ldpstp (rtx *, bool, enum machine_mode);
-extern bool aarch64_nopcrelative_literal_loads;
+
+extern void aarch64_asm_output_pool_epilogue (FILE *, const char *,
+					      tree, HOST_WIDE_INT);
+
+/* Defined in common/config/aarch64-common.c.  */
+bool aarch64_handle_option (struct gcc_options *, struct gcc_options *,
+			     const struct cl_decoded_option *, location_t);
+const char *aarch64_rewrite_selected_cpu (const char *name);
+enum aarch64_parse_opt_result aarch64_parse_extension (const char *,
+						       unsigned long *);
+std::string aarch64_get_extension_string_for_isa_flags (unsigned long,
+							unsigned long);
+
+rtl_opt_pass *make_pass_fma_steering (gcc::context *ctxt);
+
 #endif /* GCC_AARCH64_PROTOS_H */

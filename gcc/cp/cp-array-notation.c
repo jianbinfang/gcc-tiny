@@ -1,7 +1,7 @@
 /* This file is part of the Intel(R) Cilk(TM) Plus support
    It contains routines to handle Array Notation expression
    handling routines in the C++ Compiler.
-   Copyright (C) 2013-2015 Free Software Foundation, Inc.
+   Copyright (C) 2013-2017 Free Software Foundation, Inc.
    Contributed by Balaji V. Iyer <balaji.v.iyer@intel.com>,
                   Intel Corporation
 
@@ -66,7 +66,7 @@ create_an_loop (tree init, tree cond, tree incr, tree body)
 
   finish_expr_stmt (init);
   for_stmt = begin_for_stmt (NULL_TREE, NULL_TREE);
-  finish_for_init_stmt (for_stmt);
+  finish_init_stmt (for_stmt);
   finish_for_cond (cond, for_stmt, false);
   finish_for_expr (incr, for_stmt);
   finish_expr_stmt (body);
@@ -807,8 +807,8 @@ cp_expand_cond_array_notations (tree orig_stmt)
       if (!find_rank (EXPR_LOCATION (cond), cond, cond, true, &cond_rank)
 	  || !find_rank (EXPR_LOCATION (yes_expr), yes_expr, yes_expr, true,
 			 &yes_rank)
-	  || find_rank (EXPR_LOCATION (no_expr), no_expr, no_expr, true,
-			&no_rank))
+	  || !find_rank (EXPR_LOCATION (no_expr), no_expr, no_expr, true,
+			 &no_rank))
 	return error_mark_node;
       /* If the condition has a zero rank, then handle array notations in body
 	 separately.  */
@@ -1198,6 +1198,10 @@ expand_array_notation_exprs (tree t)
       }
 
     case OMP_PARALLEL:
+      OMP_PARALLEL_BODY (t)
+	= expand_array_notation_exprs (OMP_PARALLEL_BODY (t));
+      return t;
+
     case OMP_TASK:
     case OMP_FOR:
     case OMP_SINGLE:

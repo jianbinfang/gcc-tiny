@@ -1,4 +1,4 @@
-/* Copyright (C) 2007-2015 Free Software Foundation, Inc.
+/* Copyright (C) 2007-2017 Free Software Foundation, Inc.
    Contributed by Richard Henderson <rth@redhat.com>.
 
    This file is part of the GNU Offloading and Multi Processing Library
@@ -579,6 +579,7 @@ GOMP_PLUGIN_target_task_completion (void *data)
     {
       ttask->state = GOMP_TARGET_TASK_FINISHED;
       gomp_mutex_unlock (&team->task_lock);
+      return;
     }
   ttask->state = GOMP_TARGET_TASK_FINISHED;
   gomp_target_task_completion (team, task);
@@ -593,7 +594,7 @@ bool
 gomp_create_target_task (struct gomp_device_descr *devicep,
 			 void (*fn) (void *), size_t mapnum, void **hostaddrs,
 			 size_t *sizes, unsigned short *kinds,
-			 unsigned int flags, void **depend,
+			 unsigned int flags, void **depend, void **args,
 			 enum gomp_target_task_state state)
 {
   struct gomp_thread *thr = gomp_thread ();
@@ -653,6 +654,7 @@ gomp_create_target_task (struct gomp_device_descr *devicep,
   ttask->devicep = devicep;
   ttask->fn = fn;
   ttask->mapnum = mapnum;
+  ttask->args = args;
   memcpy (ttask->hostaddrs, hostaddrs, mapnum * sizeof (void *));
   ttask->sizes = (size_t *) &ttask->hostaddrs[mapnum];
   memcpy (ttask->sizes, sizes, mapnum * sizeof (size_t));

@@ -1,5 +1,5 @@
 /* Localize comdats.
-   Copyright (C) 2014-2015 Free Software Foundation, Inc.
+   Copyright (C) 2014-2017 Free Software Foundation, Inc.
 
 This file is part of GCC.
 
@@ -416,7 +416,7 @@ public:
 bool
 pass_ipa_comdats::gate (function *)
 {
-  return optimize;
+  return HAVE_COMDAT_GROUP && optimize;
 }
 
 } // anon namespace

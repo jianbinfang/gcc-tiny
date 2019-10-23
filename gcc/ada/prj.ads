@@ -6,7 +6,7 @@
 --                                                                          --
 --                                 S p e c                                  --
 --                                                                          --
---          Copyright (C) 2001-2015, Free Software Foundation, Inc.         --
+--          Copyright (C) 2001-2016, Free Software Foundation, Inc.         --
 --                                                                          --
 -- GNAT is free software;  you can  redistribute it  and/or modify it under --
 -- terms of the  GNU General Public License as published  by the Free Soft- --
@@ -1828,7 +1828,7 @@ package Prj is
    --  Severity of some situations, such as: no Ada sources in a project where
    --  Ada is one of the language.
    --
-   --  When the situation occurs, the behaviour depends on the setting:
+   --  When the situation occurs, the behavior depends on the setting:
    --
    --    - Silent:  no action
    --    - Warning: issue a warning, does not cause the tool to fail

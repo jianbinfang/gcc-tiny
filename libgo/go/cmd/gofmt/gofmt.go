@@ -13,12 +13,12 @@ import (
 	"go/printer"
 	"go/scanner"
 	"go/token"
-	"internal/format"
 	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"strings"
 )
@@ -56,7 +56,6 @@ func report(err error) {
 func usage() {
 	fmt.Fprintf(os.Stderr, "usage: gofmt [flags] [path ...]\n")
 	flag.PrintDefaults()
-	os.Exit(2)
 }
 
 func initParserMode() {
@@ -74,13 +73,19 @@ func isGoFile(f os.FileInfo) bool {
 
 // If in == nil, the source is the contents of the file with the given filename.
 func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error {
+	var perm os.FileMode = 0644
 	if in == nil {
 		f, err := os.Open(filename)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			return err
+		}
 		in = f
+		perm = fi.Mode().Perm()
 	}
 
 	src, err := ioutil.ReadAll(in)
@@ -88,7 +93,7 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 		return err
 	}
 
-	file, sourceAdj, indentAdj, err := format.Parse(fileSet, filename, src, stdin)
+	file, sourceAdj, indentAdj, err := parse(fileSet, filename, src, stdin)
 	if err != nil {
 		return err
 	}
@@ -107,7 +112,7 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 		simplify(file)
 	}
 
-	res, err := format.Format(fileSet, file, sourceAdj, indentAdj, src, printer.Config{Mode: printerMode, Tabwidth: tabWidth})
+	res, err := format(fileSet, file, sourceAdj, indentAdj, src, printer.Config{Mode: printerMode, Tabwidth: tabWidth})
 	if err != nil {
 		return err
 	}
@@ -118,7 +123,17 @@ func processFile(filename string, in io.Reader, out io.Writer, stdin bool) error
 			fmt.Fprintln(out, filename)
 		}
 		if *write {
-			err = ioutil.WriteFile(filename, res, 0644)
+			// make a temporary backup before overwriting original
+			bakname, err := backupFile(filename+".", src, perm)
+			if err != nil {
+				return err
+			}
+			err = ioutil.WriteFile(filename, res, perm)
+			if err != nil {
+				os.Rename(bakname, filename)
+				return err
+			}
+			err = os.Remove(bakname)
 			if err != nil {
 				return err
 			}
@@ -144,7 +159,9 @@ func visitFile(path string, f os.FileInfo, err error) error {
 	if err == nil && isGoFile(f) {
 		err = processFile(path, nil, os.Stdout, false)
 	}
-	if err != nil {
+	// Don't complain if a file was deleted in the meantime (i.e.
+	// the directory changed concurrently while running gofmt).
+	if err != nil && !os.IsNotExist(err) {
 		report(err)
 	}
 	return nil
@@ -234,4 +251,37 @@ func diff(b1, b2 []byte) (data []byte, err error) {
 	}
 	return
 
+}
+
+const chmodSupported = runtime.GOOS != "windows"
+
+// backupFile writes data to a new file named filename<number> with permissions perm,
+// with <number randomly chosen such that the file name is unique. backupFile returns
+// the chosen file name.
+func backupFile(filename string, data []byte, perm os.FileMode) (string, error) {
+	// create backup file
+	f, err := ioutil.TempFile(filepath.Dir(filename), filepath.Base(filename))
+	if err != nil {
+		return "", err
+	}
+	bakname := f.Name()
+	if chmodSupported {
+		err = f.Chmod(perm)
+		if err != nil {
+			f.Close()
+			os.Remove(bakname)
+			return bakname, err
+		}
+	}
+
+	// write data to backup file
+	n, err := f.Write(data)
+	if err == nil && n < len(data) {
+		err = io.ErrShortWrite
+	}
+	if err1 := f.Close(); err == nil {
+		err = err1
+	}
+
+	return bakname, err
 }

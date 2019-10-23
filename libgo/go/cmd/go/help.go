@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -42,7 +42,7 @@ denotes the package in that directory.
 
 Otherwise, the import path P denotes the package found in
 the directory DIR/src/P for some DIR listed in the GOPATH
-environment variable (see 'go help gopath').
+environment variable (For more details see: 'go help gopath').
 
 If no import paths are given, the action applies to the
 package in the current directory.
@@ -62,6 +62,9 @@ Go library.
 - "cmd" expands to the Go repository's commands and their
 internal libraries.
 
+Import paths beginning with "cmd/" only match source code in
+the Go repository.
+
 An import path is a pattern if it includes one or more "..." wildcards,
 each of which can match any string, including the empty string and
 strings containing slashes.  Such a pattern expands to all package
@@ -79,6 +82,14 @@ internally at Google all begin with 'google', and paths
 denoting remote repositories begin with the path to the code,
 such as 'github.com/user/repo'.
 
+Packages in a program need not have unique package names,
+but there are two reserved package names with special meaning.
+The name main indicates a command, not a library.
+Commands are built into binaries and cannot be imported.
+The name documentation indicates documentation for
+a non-Go program in the directory. Files in package documentation
+are ignored by the go command.
+
 As a special case, if the package list is a list of .go files from a
 single directory, the command is applied to a single synthesized
 package made up of exactly those files, ignoring any build constraints
@@ -94,10 +105,10 @@ var helpImportPath = &Command{
 	Short:     "import path syntax",
 	Long: `
 
-An import path (see 'go help packages') denotes a package
-stored in the local file system.  In general, an import path denotes
-either a standard package (such as "unicode/utf8") or a package
-found in one of the work spaces (see 'go help gopath').
+An import path (see 'go help packages') denotes a package stored in the local
+file system.  In general, an import path denotes either a standard package (such
+as "unicode/utf8") or a package found in one of the work spaces (For more
+details see: 'go help gopath').
 
 Relative import paths
 
@@ -140,14 +151,6 @@ A few common code hosting sites have special syntax:
 
 		import "github.com/user/project"
 		import "github.com/user/project/sub/directory"
-
-	Google Code Project Hosting (Git, Mercurial, Subversion)
-
-		import "code.google.com/p/project"
-		import "code.google.com/p/project/sub/directory"
-
-		import "code.google.com/p/project.subrepository"
-		import "code.google.com/p/project.subrepository/sub/directory"
 
 	Launchpad (Bazaar)
 
@@ -197,6 +200,11 @@ When a version control system supports multiple protocols,
 each is tried in turn when downloading.  For example, a Git
 download tries https://, then git+ssh://.
 
+By default, downloads are restricted to known secure protocols
+(e.g. https, ssh). To override this setting for Git downloads, the
+GIT_ALLOW_PROTOCOL environment variable can be set (For more details see:
+'go help environment').
+
 If the import path is not a known code hosting site and also lacks a
 version control qualifier, the go tool attempts to fetch the import
 over https/http and looks for a <meta> tag in the document's HTML
@@ -237,8 +245,8 @@ the go tool will verify that https://example.org/?go-get=1 contains the
 same meta tag and then git clone https://code.org/r/p/exproj into
 GOPATH/src/example.org.
 
-New downloaded packages are written to the first directory
-listed in the GOPATH environment variable (see 'go help gopath').
+New downloaded packages are written to the first directory listed in the GOPATH
+environment variable (For more details see: 'go help gopath').
 
 The go command attempts to download the version of the
 package appropriate for the Go release being used.
@@ -261,8 +269,7 @@ unless it is being referred to by that import path. In this way, import comments
 let package authors make sure the custom import path is used and not a
 direct path to the underlying code hosting site.
 
-If the vendoring experiment is enabled (see 'go help gopath'),
-then import path checking is disabled for code found within vendor trees.
+Import path checking is disabled for code found within vendor trees.
 This makes it possible to copy code into alternate locations in vendor trees
 without needing to update import comments.
 
@@ -282,8 +289,13 @@ On Unix, the value is a colon-separated string.
 On Windows, the value is a semicolon-separated string.
 On Plan 9, the value is a list.
 
-GOPATH must be set to get, build and install packages outside the
-standard Go tree.
+If the environment variable is unset, GOPATH defaults
+to a subdirectory named "go" in the user's home directory
+($HOME/go on Unix, %USERPROFILE%\go on Windows),
+unless that directory holds a Go distribution.
+Run "go env GOPATH" to see the current GOPATH.
+
+See https://golang.org/wiki/SettingGOPATH to set a custom GOPATH.
 
 Each directory listed in GOPATH must have a prescribed structure:
 
@@ -307,13 +319,13 @@ DIR/bin/quux, not DIR/bin/foo/quux.  The "foo/" prefix is stripped
 so that you can add DIR/bin to your PATH to get at the
 installed commands.  If the GOBIN environment variable is
 set, commands are installed to the directory it names instead
-of DIR/bin.
+of DIR/bin. GOBIN must be an absolute path.
 
 Here's an example directory layout:
 
-    GOPATH=/home/user/gocode
+    GOPATH=/home/user/go
 
-    /home/user/gocode/
+    /home/user/go/
         src/
             foo/
                 bar/               (go code in package bar)
@@ -339,7 +351,7 @@ Code in or below a directory named "internal" is importable only
 by code in the directory tree rooted at the parent of "internal".
 Here's an extended version of the directory layout above:
 
-    /home/user/gocode/
+    /home/user/go/
         src/
             crash/
                 bang/              (go code in package bang)
@@ -365,13 +377,10 @@ See https://golang.org/s/go14internal for details.
 
 Vendor Directories
 
-Go 1.5 includes experimental support for using local copies
-of external dependencies to satisfy imports of those dependencies,
-often referred to as vendoring. Setting the environment variable
-GO15VENDOREXPERIMENT=1 enables that experimental support.
+Go 1.6 includes support for using local copies of external dependencies
+to satisfy imports of those dependencies, often referred to as vendoring.
 
-When the vendor experiment is enabled,
-code below a directory named "vendor" is importable only
+Code below a directory named "vendor" is importable only
 by code in the directory tree rooted at the parent of "vendor",
 and only using an import path that omits the prefix up to and
 including the vendor element.
@@ -380,7 +389,7 @@ Here's the example from the previous section,
 but with the "internal" directory renamed to "vendor"
 and a new foo/vendor/crash/bang directory added:
 
-    /home/user/gocode/
+    /home/user/go/
         src/
             crash/
                 bang/              (go code in package bang)
@@ -409,12 +418,12 @@ top-level "crash/bang".
 Code in vendor directories is not subject to import path
 checking (see 'go help importpath').
 
-When the vendor experiment is enabled, 'go get' checks out
-submodules when checking out or updating a git repository
-(see 'go help get').
+When 'go get' checks out or updates a git repository, it now also
+updates submodules.
 
-The vendoring semantics are an experiment, and they may change
-in future releases. Once settled, they will be on by default.
+Vendor directories do not affect the placement of new repositories
+being checked out for the first time by 'go get': those are always
+placed in the main GOPATH, never in a vendor subtree.
 
 See https://golang.org/s/go15vendor for details.
 	`,
@@ -443,7 +452,7 @@ General-purpose environment variables:
 		The operating system for which to compile code.
 		Examples are linux, darwin, windows, netbsd.
 	GOPATH
-		See 'go help gopath'.
+		For more details see: 'go help gopath'.
 	GORACE
 		Options for the race detector.
 		See https://golang.org/doc/articles/race_detector.html.
@@ -465,10 +474,15 @@ Environment variables for use with cgo:
 	CGO_CXXFLAGS
 		Flags that cgo will pass to the compiler when compiling
 		C++ code.
+	CGO_FFLAGS
+		Flags that cgo will pass to the compiler when compiling
+		Fortran code.
 	CGO_LDFLAGS
 		Flags that cgo will pass to the compiler when linking.
 	CXX
 		The command to use to compile C++ code.
+	PKG_CONFIG
+		Path to pkg-config tool.
 
 Architecture-specific environment variables:
 
@@ -486,12 +500,14 @@ Special-purpose environment variables:
 		installed in a location other than where it is built.
 		File names in stack traces are rewritten from GOROOT to
 		GOROOT_FINAL.
-	GO15VENDOREXPERIMENT
-		Set to 1 to enable the Go 1.5 vendoring experiment.
 	GO_EXTLINK_ENABLED
 		Whether the linker should use external linking mode
 		when using -linkmode=auto with code that uses cgo.
 		Set to 0 to disable external linking mode, 1 to enable it.
+	GIT_ALLOW_PROTOCOL
+		Defined by Git. A colon-separated list of schemes that are allowed to be used
+		with git fetch/clone. If set, any scheme not explicitly mentioned will be
+		considered insecure by 'go get'.
 	`,
 }
 
@@ -529,7 +545,15 @@ the extension of the file name. These extensions are:
 Files of each of these types except .syso may contain build
 constraints, but the go command stops scanning for build constraints
 at the first item in the file that is not a blank line or //-style
-line comment.
+line comment. See the go/build package documentation for
+more details.
+
+Non-test Go source files can also include a //go:binary-only-package
+comment, indicating that the package sources are included
+for documentation only and must not be used to build the
+package binary. This enables distribution of Go packages in
+their compiled form alone. See the go/build package documentation
+for more details.
 	`,
 }
 
@@ -570,5 +594,14 @@ are:
 	-buildmode=exe
 		Build the listed main packages and everything they import into
 		executables. Packages not named main are ignored.
+
+	-buildmode=pie
+		Build the listed main packages and everything they import into
+		position independent executables (PIE). Packages not named
+		main are ignored.
+
+	-buildmode=plugin
+		Build the listed main packages, plus all packages that they
+		import, into a Go plugin. Packages not named main are ignored.
 `,
 }
